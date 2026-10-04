@@ -1,6 +1,6 @@
-# Equalizer
+# Suerte
 
-Equalizer is a desktop music player and library app built with Electron, React, and TypeScript. It lets you scan local music folders, browse your collection by artist and album, search tracks, and play audio with a built-in Web Audio playback engine.
+Suerte is a desktop music player and library app built with Electron, React, and TypeScript. It lets you scan local music folders, browse your collection by artist and album, search tracks, and play audio with a built-in Web Audio playback engine.
 
 The project is organized around a local-first workflow: the app keeps a library index in the main process, exposes a narrow IPC surface to the renderer, and persists settings such as theme and Discogs token between launches.
 
