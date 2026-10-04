@@ -1,0 +1,68 @@
+import { join } from 'node:path'
+import { app, BrowserWindow, shell } from 'electron'
+import { loadConfig } from './config'
+import { createIpcContext, registerIpc, rescan } from './ipc'
+
+// Resolved eagerly because app.getPath is unavailable until the app is ready.
+const userDataDir = app.getPath('userData')
+const ipcContext = createIpcContext(userDataDir)
+
+function createWindow(): BrowserWindow {
+  const window = new BrowserWindow({
+    width: 1280,
+    height: 800,
+    show: false,
+    backgroundColor: '#000000',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+
+  window.once('ready-to-show', () => window.show())
+
+  // Picks up files added or removed in Explorer while the app was in the background.
+  window.on('focus', () => {
+    if (ipcContext.roots.length > 0 && !ipcContext.scanning) void rescan(ipcContext)
+  })
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+
+  const rendererUrl = process.env['ELECTRON_RENDERER_URL']
+  if (!app.isPackaged && rendererUrl) {
+    void window.loadURL(rendererUrl)
+  } else {
+    void window.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+
+  return window
+}
+
+app.whenReady().then(async () => {
+  registerIpc(ipcContext)
+
+  // Folders chosen in an earlier session are restored, then rescanned in the
+  // background, so launching the app lands straight on the library.
+  const config = await loadConfig(userDataDir)
+  ipcContext.roots = [...config.roots]
+  ipcContext.theme = config.theme
+  ipcContext.discogsToken = config.discogsToken
+
+  createWindow()
+
+  if (ipcContext.roots.length > 0) void rescan(ipcContext)
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+})
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit()
+})

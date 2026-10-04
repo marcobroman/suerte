@@ -1,0 +1,14 @@
+appId: com.equalizer.app
+productName: Equalizer
+directories:
+  buildResources: build
+  output: release
+files:
+  - out/**
+  - package.json
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
