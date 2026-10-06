@@ -1,54 +1,57 @@
 # Suerte
 
-Suerte is a desktop music player and library app built with Electron, React, and TypeScript. It lets you scan local music folders, browse your collection by artist and album, search tracks, and play audio with a built-in Web Audio playback engine.
+Suerte is a desktop music player and library app built with Electron, React, and TypeScript. Scan local music folders, browse by artist and album, manage a playback queue, shape the sound with a 10-band graphic EQ, and fix up MP3 tags — by hand or automatically via Discogs.
 
-The project is organized around a local-first workflow: the app keeps a library index in the main process, exposes a narrow IPC surface to the renderer, and persists settings such as theme and Discogs token between launches.
+The project follows a local-first workflow: the main process owns the library index and filesystem access, exposes a narrow typed IPC surface to the sandboxed renderer, and persists settings between launches.
 
 ## Features
 
-- Multi-folder music library scanning for local audio files
-- Artist and album browsing with track-level search and filtering
-- Queue-based playback with play, pause, seek, skip, and repeat-like queue management
-- Web Audio-based sound engine with volume and EQ settings support
-- Album/cover art handling and Discogs metadata lookups
-- Tag editing support for supported files
-- Persistent app settings including library roots and theme
-- Testing with Vitest and static checking with TypeScript ESLint
+- Multi-folder music library scanning with progress, cancellation, and change detection
+- Artist and album browsing, global search across artists/albums/tracks, and album sorting (artist, title, year)
+- Queue-based playback: play, pause, seek, next/previous, play-next/add-to-queue/remove, collapsible Up-next panel
+- 10-band graphic EQ with a draggable response curve, presets, preamp/bass/treble controls, and auto-preamp anti-clipping
+- MP3 tag editing (title, artist, album, track number, year, cover art) with backup/write/verify/rollback safety
+- Discogs auto-tag: search releases, preview the track mapping, and apply fields plus cover art in one step (needs a free personal token)
+- Embedded cover-art display for albums, tracks, and the player bar
+- Eight color themes with persisted selection
+- Missing/unavailable folder warnings (removable drives are never auto-pruned)
+- Keyboard: spacebar toggles play/pause outside of inputs and menus
 
 ## Tech Stack
 
-- Electron for desktop app shell and native integration
+- Electron for the desktop shell and native integration
 - React 19 for the renderer UI
-- TypeScript for app and shared contracts
-- Vite and electron-vite for build and dev workflow
-- music-metadata and node-id3 for audio metadata and tag reading/writing
+- TypeScript (strict) for app code and shared contracts
+- Vite and electron-vite for the dev/build workflow
+- music-metadata for tag reading, node-id3 for MP3 tag writing
+- Vitest for tests, ESLint for linting, electron-builder for packaging
 
 ## Project Structure
 
 ```text
 .
 ├── src/
-│   ├── main/                 # Electron main process logic
+│   ├── main/                 # Electron main process (library, tags, Discogs, IPC, config)
 │   │   ├── config.ts
 │   │   ├── discogs.ts
 │   │   ├── index.ts
 │   │   ├── ipc.ts
-│   │   └── library/
-│   ├── preload/             # Secure preload bridge exposed to renderer
-│   ├── renderer/            # React/UI code and playback engine
-│   │   └── src/
-│   ├── shared/              # Shared IPC and type definitions
-│   └──
-├── test/                    # Vitest test suite
-├── electron-builder.yml     # Packaging configuration
-├── electron.vite.config.ts  # Electron Vite config
-├── eslint.config.mjs        # ESLint configuration
-├── package.json             # Scripts and dependencies
-├── tsconfig.json            # TypeScript baseline config
-├── tsconfig.node.json       # Node-side TypeScript config
-├── tsconfig.web.json        # Renderer-side TypeScript config
-├── vitest.config.ts         # Test configuration
-└── README.md                # Project overview and usage
+│   │   └── library/          # scan, group, cache, covers, roots, tags
+│   ├── preload/              # Secure bridge exposed to the renderer
+│   ├── renderer/src/         # React UI, playback engine, Web Audio graph
+│   │   ├── audio/            # engine, EQ DSP, settings, response math
+│   │   └── library/          # views, queue, search/sort, auto-tag, themes
+│   └── shared/               # IPC contract and shared type definitions
+├── test/                     # Vitest suite (mirrors src layout)
+├── electron-builder.yml      # Packaging configuration
+├── electron.vite.config.ts   # Electron Vite config
+├── eslint.config.mjs         # ESLint configuration
+├── package.json              # Scripts and dependencies
+├── tsconfig.json             # TypeScript baseline config
+├── tsconfig.node.json        # Node-side TypeScript config
+├── tsconfig.web.json         # Renderer-side TypeScript config
+├── vitest.config.ts          # Test configuration
+└── README.md                 # Project overview and usage
 ```
 
 ## Getting Started
@@ -80,7 +83,7 @@ npm run typecheck
 ### Run tests
 
 ```bash
-npm run test
+npm test
 ```
 
 ### Lint the project
@@ -100,21 +103,24 @@ This runs type checks and then builds the Electron app for production.
 ## Typical Usage
 
 1. Launch the app.
-2. Choose one or more folders to index as your music library.
-3. Let the scan populate the library.
-4. Browse by artist or album, or use the search box to filter tracks.
-5. Play tracks from the queue or open an album to queue its contents.
-6. Adjust audio settings or theme in the app settings panel.
-7. Optionally add a Discogs token to enrich metadata and cover art.
+2. Add one or more folders from Settings (gear icon, top right) and let the scan populate the library.
+3. Browse by artist or album, use global search, or sort the album grid.
+4. Click an album or track to play; use the ⋯ menus for play-next, add-to-queue, reveal-in-Explorer, or auto-tag.
+5. Open the equalizer from the sliders button in the player bar; drag nodes on the curve or pick a preset.
+6. Paste a Discogs personal token in Settings to enable auto-tag with cover art.
+7. Switch themes from Settings; everything persists across launches.
 
 ## Configuration and Persistence
 
-The app stores small user preferences and chosen library roots in the Electron user data directory, so the library can be restored automatically on the next launch. Settings currently cover:
+Small preferences and library roots live in `library.json` inside the Electron user data directory, so the library restores automatically on the next launch. Persisted settings currently cover:
 
 - selected music folders
 - app theme
-- Discogs token status
+- Discogs token presence (the token itself never leaves the main process)
+- equalizer curve (master volume stays session-only)
 
 ## Notes
 
-This repository is actively structured around a local audio library workflow and includes substantial test coverage around scanning, cache behavior, metadata handling, and playback graph logic. It is best suited for desktop-based music listening and local collection management rather than streaming or cloud-based music services.
+- Tag writing supports MP3 files only; other formats open as read-only in tag flows.
+- Auto-tag needs network access and a Discogs token; cover art embeds JPEG/PNG only.
+- The suite is a local audio library workflow: substantial test coverage exists around scanning, cache behavior, metadata handling, queue/engine logic, and EQ math. It is built for desktop listening and collection management, not streaming.

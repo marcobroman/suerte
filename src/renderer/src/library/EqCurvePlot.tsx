@@ -5,9 +5,8 @@ import { BANDS } from '../audio/bands'
 import {
   CURVE_PAD_LEFT,
   CURVE_PAD_RIGHT,
-  EQ_CURVE_MIN_HZ,
+  bandShapeNodes,
   createCurveScale,
-  eqCurveDb,
   smoothPath,
   type CurvePoint
 } from './eqCurve'
@@ -46,14 +45,10 @@ export function EqCurvePlot({ eq, onBandGain, onBandReset }: EqCurvePlotProps) {
   const scale = useMemo(() => createCurveScale(plotWidth, PLOT_HEIGHT), [plotWidth])
 
   const path = useMemo(() => {
-    const { frequenciesHz, magnitudesDb } = eqCurveDb(eq)
-    const points: CurvePoint[] = []
-    for (let index = 0; index < frequenciesHz.length; index++) {
-      points.push({
-        x: scale.xForHz(frequenciesHz[index] ?? EQ_CURVE_MIN_HZ),
-        y: scale.yForDb(magnitudesDb[index] ?? 0)
-      })
-    }
+    const points: CurvePoint[] = bandShapeNodes(eq.bandGainsDb).map((node) => ({
+      x: scale.xForHz(node.frequencyHz),
+      y: scale.yForDb(node.gainDb)
+    }))
     return smoothPath(points)
   }, [eq, scale])
 

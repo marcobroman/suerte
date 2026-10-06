@@ -1,47 +1,31 @@
-import type { EqSettings } from '@shared/types'
 import { BAND_GAIN_MAX_DB, BAND_GAIN_MIN_DB } from '../audio/db'
-import { BAND_Q, ISO_BAND_FREQUENCIES, SHELF_Q, logFrequencyGrid } from '../audio/bands'
-import { responseCurveDb, type FilterSpec } from '../audio/response'
-import { resolveGraphSettings, type ResolvedGraphSettings } from '../audio/settings'
+import { ISO_BAND_FREQUENCIES } from '../audio/bands'
 
 export const EQ_CURVE_MIN_HZ = 20
 export const EQ_CURVE_MAX_HZ = 20000
-export const EQ_CURVE_POINTS = 128
-/** Display-only rate; the top band only relocates on ≤32 kHz devices. */
-export const EQ_CURVE_SAMPLE_RATE = 48000
 
-export interface EqCurveData {
-  readonly frequenciesHz: readonly number[]
-  readonly magnitudesDb: readonly number[]
+export interface BandNode {
+  readonly frequencyHz: number
+  readonly gainDb: number
 }
 
 /**
- * Display curve for the panel: the filter cascade only, pivoting around 0 dB.
- * Preamp and auto-preamp headroom are deliberately excluded — they shift overall
- * loudness, not tone, and including them makes a boost look like it pushes
- * everything else down. The live chain is untouched and still compensates.
- * Pure, so the panel renders it with no audio objects involved.
+ * The dialed shape: band gains pinned at their centres, extended flat to the
+ * plot edges so the stroke spans the frame. The rendered line always passes
+ * through every node by construction. Shelves and headroom shape the sound but
+ * are intentionally not drawn — drawing the true combined response is what let
+ * the line drift off the nodes.
  */
-export function eqCurveDb(eq: EqSettings, sampleRate: number = EQ_CURVE_SAMPLE_RATE): EqCurveData {
-  const resolved = resolveGraphSettings(eq, sampleRate, ISO_BAND_FREQUENCIES)
-  const frequenciesHz = logFrequencyGrid(EQ_CURVE_MIN_HZ, EQ_CURVE_MAX_HZ, EQ_CURVE_POINTS)
-  const cascadeDb = responseCurveDb(
-    { sampleRate, filters: cascadeFilters(resolved) },
-    frequenciesHz
-  )
-  return { frequenciesHz, magnitudesDb: cascadeDb }
-}
-
-function cascadeFilters(resolved: ResolvedGraphSettings): FilterSpec[] {
+export function bandShapeNodes(bandGainsDb: readonly number[]): BandNode[] {
+  const first = bandGainsDb[0] ?? 0
+  const last = bandGainsDb[bandGainsDb.length - 1] ?? 0
   return [
-    ...resolved.bands.map((band) => ({
-      kind: 'peaking' as const,
-      frequencyHz: band.frequencyHz,
-      gainDb: band.gainDb,
-      q: BAND_Q
+    { frequencyHz: EQ_CURVE_MIN_HZ, gainDb: first },
+    ...ISO_BAND_FREQUENCIES.map((frequencyHz, index) => ({
+      frequencyHz,
+      gainDb: bandGainsDb[index] ?? 0
     })),
-    { kind: 'lowshelf' as const, frequencyHz: resolved.bass.frequencyHz, gainDb: resolved.bass.gainDb, q: SHELF_Q },
-    { kind: 'highshelf' as const, frequencyHz: resolved.treble.frequencyHz, gainDb: resolved.treble.gainDb, q: SHELF_Q }
+    { frequencyHz: EQ_CURVE_MAX_HZ, gainDb: last }
   ]
 }
 
