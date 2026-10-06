@@ -1,8 +1,14 @@
 import type { Track } from '@shared/types'
-import type { EngineStatus } from '../audio/engine'
+import type { EngineStatus, RepeatMode } from '../audio/engine'
 import { formatDuration } from '../format'
 import { Slider } from '../Slider'
 import { CoverArt } from './CoverArt'
+
+const REPEAT_LABELS: Record<RepeatMode, string> = {
+  off: 'Repeat off',
+  all: 'Repeat all',
+  one: 'Repeat one'
+}
 
 export interface NowPlayingBarProps {
   readonly track: Track | null
@@ -12,12 +18,16 @@ export interface NowPlayingBarProps {
   readonly volume: number
   readonly canPlay: boolean
   readonly eqOpen: boolean
+  readonly repeat: RepeatMode
+  readonly shuffle: boolean
   onToggle(): void
   onNext(): void
   onPrevious(): void
   onSeek(seconds: number): void
   onVolume(volume: number): void
   onToggleEq(): void
+  onCycleRepeat(): void
+  onToggleShuffle(): void
 }
 
 /**
@@ -32,12 +42,16 @@ export function NowPlayingBar({
   volume,
   canPlay,
   eqOpen,
+  repeat,
+  shuffle,
   onToggle,
   onNext,
   onPrevious,
   onSeek,
   onVolume,
-  onToggleEq
+  onToggleEq,
+  onCycleRepeat,
+  onToggleShuffle
 }: NowPlayingBarProps) {
   const playing = state === 'playing'
   const loading = state === 'loading'
@@ -55,6 +69,26 @@ export function NowPlayingBar({
 
       <div className="player-center">
         <div className="transport">
+          <button
+            type="button"
+            className={shuffle ? 'icon-toggle transport-small active' : 'icon-toggle transport-small'}
+            onClick={onToggleShuffle}
+            disabled={!canPlay}
+            aria-label={shuffle ? 'Shuffle on' : 'Shuffle off'}
+            aria-pressed={shuffle}
+            title="Shuffle"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path
+                d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
           <button type="button" onClick={onPrevious} disabled={!canPlay} aria-label="Previous">
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
               <path d="M7 6v12H5V6h2zm12 0v12l-9-6 9-6z" fill="currentColor" />
@@ -83,6 +117,32 @@ export function NowPlayingBar({
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
               <path d="M17 6v12h2V6h-2zM5 6v12l9-6-9-6z" fill="currentColor" />
             </svg>
+          </button>
+          <button
+            type="button"
+            className={
+              repeat === 'off' ? 'icon-toggle transport-small' : 'icon-toggle transport-small active'
+            }
+            onClick={onCycleRepeat}
+            disabled={!canPlay}
+            aria-label={REPEAT_LABELS[repeat]}
+            title={REPEAT_LABELS[repeat]}
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path
+                d="M17 2l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 22l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            {repeat === 'one' && (
+              <span className="transport-badge" aria-hidden="true">
+                1
+              </span>
+            )}
           </button>
         </div>
 

@@ -832,12 +832,16 @@ export function App() {
           volume={playback.status.volume}
           canPlay={canPlay}
           eqOpen={eqOpen}
+          repeat={playback.status.repeat}
+          shuffle={playback.status.shuffle}
           onToggle={togglePlayback}
           onNext={playback.next}
           onPrevious={playback.previous}
           onSeek={playback.seek}
           onVolume={playback.setVolume}
           onToggleEq={() => setEqOpen((open) => !open)}
+          onCycleRepeat={() => playback.cycleRepeat()}
+          onToggleShuffle={() => playback.toggleShuffle()}
         />
       </div>
       {autoTag && (

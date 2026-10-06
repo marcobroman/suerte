@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { EqSettings, Track } from '@shared/types'
-import { PlaybackEngine, type EngineStatus } from './audio/engine'
+import { PlaybackEngine, type EngineStatus, type RepeatMode } from './audio/engine'
 import { createWebAudioGraph } from './audio/web-audio-graph'
 import { defaultEqSettings } from './audio/settings'
 
@@ -11,6 +11,8 @@ const IDLE_STATUS: EngineStatus = {
   queue: [],
   queueLength: 0,
   eq: defaultEqSettings(),
+  repeat: 'off',
+  shuffle: false,
   positionSec: 0,
   durationSec: 0,
   volume: 0.85,
@@ -32,6 +34,10 @@ export interface PlaybackControls {
   removeAt(index: number): void
   refreshTracks(tracks: readonly Track[]): void
   setEq(settings: EqSettings): void
+  setRepeat(mode: RepeatMode): void
+  cycleRepeat(): void
+  setShuffle(on: boolean): void
+  toggleShuffle(): void
   setVolume(volume: number): void
 }
 
@@ -123,6 +129,16 @@ export function usePlaybackEngine(): PlaybackControls {
       (settings: EqSettings) => call((engine) => engine.setEq(settings)),
       [call]
     ),
+    setRepeat: useCallback(
+      (mode: RepeatMode) => call((engine) => engine.setRepeat(mode)),
+      [call]
+    ),
+    cycleRepeat: useCallback(() => call((engine) => engine.cycleRepeat()), [call]),
+    setShuffle: useCallback(
+      (on: boolean) => call((engine) => engine.setShuffle(on)),
+      [call]
+    ),
+    toggleShuffle: useCallback(() => call((engine) => engine.toggleShuffle()), [call]),
     setVolume: useCallback((volume: number) => call((engine) => engine.setVolume(volume)), [call])
   }
 }

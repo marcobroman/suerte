@@ -564,4 +564,132 @@ describe('PlaybackEngine', () => {
     expect(engine.status().index).toBe(0)
     expect(engine.state).toBe('playing')
   })
+
+  it('starts with repeat off and shuffle off', () => {
+    const { engine } = makeEngine()
+
+    expect(engine.status().repeat).toBe('off')
+    expect(engine.status().shuffle).toBe(false)
+  })
+
+  it('cycles repeat off, all, one, and back', () => {
+    const { engine } = makeEngine()
+
+    engine.cycleRepeat()
+    expect(engine.status().repeat).toBe('all')
+    engine.cycleRepeat()
+    expect(engine.status().repeat).toBe('one')
+    engine.cycleRepeat()
+    expect(engine.status().repeat).toBe('off')
+  })
+
+  it('ignores unknown repeat modes', () => {
+    const { engine } = makeEngine()
+
+    engine.setRepeat('sometimes' as never)
+
+    expect(engine.status().repeat).toBe('off')
+  })
+
+  it('wraps to the start when repeating all', async () => {
+    const { engine, factory } = makeEngine([track('a.mp3', 10), track('b.mp3', 10)])
+    engine.setRepeat('all')
+    await engine.playAt(1)
+
+    factory.current.lastVoice?.finish()
+    await engine.settled()
+
+    expect(engine.status().index).toBe(0)
+    expect(engine.status().track?.path).toBe('a.mp3')
+    expect(engine.state).toBe('playing')
+  })
+
+  it('wraps the next button when repeating all', async () => {
+    const { engine } = makeEngine([track('a.mp3', 10), track('b.mp3', 10)])
+    engine.setRepeat('all')
+    await engine.playAt(1)
+
+    await engine.next()
+
+    expect(engine.status().index).toBe(0)
+    expect(engine.status().track?.path).toBe('a.mp3')
+  })
+
+  it('replays the finished track when repeating one', async () => {
+    const { engine, factory } = makeEngine([track('a.mp3', 10), track('b.mp3', 10)])
+    engine.setRepeat('one')
+    await engine.play()
+
+    factory.current.lastVoice?.finish()
+    await engine.settled()
+
+    expect(engine.status().index).toBe(0)
+    expect(engine.status().track?.path).toBe('a.mp3')
+    expect(engine.state).toBe('playing')
+    expect(factory.current.voices).toHaveLength(2)
+  })
+
+  it('shuffles upcoming tracks while the current one holds still', async () => {
+    const paths = ['a.mp3', 'b.mp3', 'c.mp3', 'd.mp3', 'e.mp3', 'f.mp3']
+    const { engine } = makeEngine(paths.map((path) => track(path, 10)))
+    await engine.play()
+
+    engine.setShuffle(true)
+
+    expect(engine.status().shuffle).toBe(true)
+    expect(engine.status().index).toBe(0)
+    expect(engine.status().track?.path).toBe('a.mp3')
+    expect(engine.state).toBe('playing')
+    expect([...engine.status().queue.map((t) => t.path)].sort()).toEqual([...paths].sort())
+  })
+
+  it('restores the original order when unshuffling', async () => {
+    const paths = ['a.mp3', 'b.mp3', 'c.mp3', 'd.mp3', 'e.mp3', 'f.mp3']
+    const { engine } = makeEngine(paths.map((path) => track(path, 10)))
+    await engine.play()
+    engine.setShuffle(true)
+
+    engine.setShuffle(false)
+
+    expect(engine.status().shuffle).toBe(false)
+    expect(engine.status().queue.map((t) => t.path)).toEqual(paths)
+    expect(engine.status().index).toBe(0)
+    expect(engine.status().track?.path).toBe('a.mp3')
+    expect(engine.state).toBe('playing')
+  })
+
+  it('keeps queued-while-shuffled tracks when unshuffling', async () => {
+    const { engine } = makeEngine([track('a.mp3', 10), track('b.mp3', 10), track('c.mp3', 10)])
+    await engine.play()
+    engine.setShuffle(true)
+
+    engine.addNext([track('x.mp3', 10)])
+    engine.setShuffle(false)
+
+    expect(engine.status().queue.map((t) => t.path)).toEqual(['a.mp3', 'x.mp3', 'b.mp3', 'c.mp3'])
+    expect(engine.status().index).toBe(0)
+  })
+
+  it('drops queued-while-shuffled removals when unshuffling', async () => {
+    const { engine } = makeEngine([track('a.mp3', 10), track('b.mp3', 10), track('c.mp3', 10)])
+    await engine.play()
+    engine.setShuffle(true)
+
+    const at = engine.status().queue.findIndex((t) => t.path === 'c.mp3')
+    engine.removeAt(at)
+    engine.setShuffle(false)
+
+    expect(engine.status().queue.map((t) => t.path)).toEqual(['a.mp3', 'b.mp3'])
+  })
+
+  it('treats a replaced queue as a fresh unshuffled context', async () => {
+    const { engine } = makeEngine([track('a.mp3', 10), track('b.mp3', 10)])
+    await engine.play()
+    engine.setShuffle(true)
+
+    engine.setQueue([track('z.mp3', 10)])
+
+    expect(engine.status().shuffle).toBe(false)
+    expect(engine.status().queue.map((t) => t.path)).toEqual(['z.mp3'])
+  })
 })

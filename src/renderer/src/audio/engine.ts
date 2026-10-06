@@ -6,6 +6,9 @@ import { clampMasterVolume, defaultEqSettings } from './settings'
 
 export type EngineState = 'idle' | 'loading' | 'playing' | 'paused' | 'error'
 
+/** off: stop at the end. all: wrap to the start. one: replay the finished track. */
+export type RepeatMode = 'off' | 'all' | 'one'
+
 export interface EngineStatus {
   readonly state: EngineState
   readonly track: Track | null
@@ -13,6 +16,8 @@ export interface EngineStatus {
   readonly queue: readonly Track[]
   readonly queueLength: number
   readonly eq: EqSettings
+  readonly repeat: RepeatMode
+  readonly shuffle: boolean
   readonly positionSec: number
   readonly durationSec: number
   readonly volume: number
@@ -48,6 +53,14 @@ export class PlaybackEngine {
   #buffer: AudioBufferLike | null = null
   #voice: Voice | null = null
   #eq: EqSettings = defaultEqSettings()
+  #repeat: RepeatMode = 'off'
+  #shuffle = false
+  /**
+   * Pre-shuffle play order, kept as a permutation of the queue (same object
+   * references) so unshuffling restores it exactly. Null whenever the queue is
+   * an explicit choice rather than a shuffled view.
+   */
+  #unshuffled: readonly Track[] | null = null
   #volume: number
   #state: EngineState = 'idle'
   #error: string | null = null
@@ -91,6 +104,8 @@ export class PlaybackEngine {
       queue: [...this.#queue],
       queueLength: this.#queue.length,
       eq: { ...this.#eq, bandGainsDb: [...this.#eq.bandGainsDb] },
+      repeat: this.#repeat,
+      shuffle: this.#shuffle,
       positionSec: this.position(),
       durationSec: this.#durationSec,
       volume: this.#volume,
@@ -134,6 +149,11 @@ export class PlaybackEngine {
    * the previous track; pass `preservePlayback: false` to stop the old track.
    */
   setQueue(tracks: readonly Track[], startIndex = -1, preservePlayback = true): void {
+    // A replaced queue is always a fresh explicit context, never a shuffled
+    // view of something else.
+    this.#shuffle = false
+    this.#unshuffled = null
+
     const previous = this.#queue[this.#index] ?? null
     const wasActive = preservePlayback && (this.#state === 'playing' || this.#state === 'loading')
     const previousOffset = this.position()
@@ -242,7 +262,12 @@ export class PlaybackEngine {
 
   async next(): Promise<void> {
     const target = this.#index + 1
-    if (target >= this.#queue.length) return
+    if (target >= this.#queue.length) {
+      if (this.#repeat === 'all' && this.#queue.length > 0) {
+        await this.#startAt(0, 0)
+      }
+      return
+    }
     await this.#startAt(target, 0)
   }
 
@@ -266,17 +291,23 @@ export class PlaybackEngine {
    */
   refreshTracks(tracks: readonly Track[]): void {
     const fresh = new Map(tracks.map((track) => [track.path, track] as const))
-    let changed = false
-    const next = this.#queue.map((entry) => {
-      const replacement = fresh.get(entry.path)
-      if (replacement && replacement !== entry) {
-        changed = true
-        return replacement
-      }
-      return entry
-    })
-    if (!changed) return
-    this.#queue = next
+    const remap = (entries: readonly Track[]): { list: readonly Track[]; changed: boolean } => {
+      let changed = false
+      const list = entries.map((entry) => {
+        const replacement = fresh.get(entry.path)
+        if (replacement && replacement !== entry) {
+          changed = true
+          return replacement
+        }
+        return entry
+      })
+      return { list, changed }
+    }
+    const queue = remap(this.#queue)
+    const saved = this.#unshuffled ? remap(this.#unshuffled) : null
+    if (!queue.changed && !saved?.changed) return
+    this.#queue = queue.list
+    if (saved) this.#unshuffled = saved.list
     this.#emit()
   }
 
@@ -287,8 +318,18 @@ export class PlaybackEngine {
    */
   addNext(tracks: readonly Track[]): void {
     if (tracks.length === 0) return
-    const at = this.#index >= 0 ? this.#index + 1 : this.#queue.length
+    const current = this.#index >= 0 ? (this.#queue[this.#index] ?? null) : null
+    const at = current !== null ? this.#index + 1 : this.#queue.length
     this.#queue = [...this.#queue.slice(0, at), ...tracks, ...this.#queue.slice(at)]
+    if (this.#unshuffled) {
+      const savedAt =
+        current !== null ? this.#unshuffled.indexOf(current) + 1 : this.#unshuffled.length
+      this.#unshuffled = [
+        ...this.#unshuffled.slice(0, savedAt),
+        ...tracks,
+        ...this.#unshuffled.slice(savedAt)
+      ]
+    }
     this.#emit()
   }
 
@@ -296,6 +337,7 @@ export class PlaybackEngine {
   addLast(tracks: readonly Track[]): void {
     if (tracks.length === 0) return
     this.#queue = [...this.#queue, ...tracks]
+    if (this.#unshuffled) this.#unshuffled = [...this.#unshuffled, ...tracks]
     this.#emit()
   }
 
@@ -306,9 +348,20 @@ export class PlaybackEngine {
    */
   removeAt(index: number): void {
     if (index < 0 || index >= this.#queue.length) return
+    const removed = this.#queue[index]
     const wasCurrent = index === this.#index
     const wasActive =
       wasCurrent && (this.#state === 'playing' || this.#state === 'loading')
+
+    if (this.#unshuffled && removed) {
+      const savedAt = this.#unshuffled.indexOf(removed)
+      if (savedAt >= 0) {
+        this.#unshuffled = [
+          ...this.#unshuffled.slice(0, savedAt),
+          ...this.#unshuffled.slice(savedAt + 1)
+        ]
+      }
+    }
 
     if (!wasCurrent) {
       this.#queue = [...this.#queue.slice(0, index), ...this.#queue.slice(index + 1)]
@@ -343,6 +396,59 @@ export class PlaybackEngine {
     this.#volume = clampMasterVolume(settings.masterVolume)
     this.#graph?.setEq(settings, ISO_BAND_FREQUENCIES)
     this.#emit()
+  }
+
+  /** Unknown modes are ignored rather than wedging playback into a bad state. */
+  setRepeat(mode: RepeatMode): void {
+    if (mode !== 'off' && mode !== 'all' && mode !== 'one') return
+    if (mode === this.#repeat) return
+    this.#repeat = mode
+    this.#emit()
+  }
+
+  /** Cycles off → all → one, the standard transport order. */
+  cycleRepeat(): void {
+    this.setRepeat(this.#repeat === 'off' ? 'all' : this.#repeat === 'all' ? 'one' : 'off')
+  }
+
+  /**
+   * Shuffles only what comes after the current track, which keeps playing
+   * untouched. With nothing selected the whole queue shuffles. Toggling off
+   * restores the pre-shuffle order with the current track re-anchored.
+   */
+  setShuffle(on: boolean): void {
+    if (on === this.#shuffle) return
+    if (!on) {
+      const current = this.#index >= 0 ? (this.#queue[this.#index] ?? null) : null
+      if (this.#unshuffled) this.#queue = [...this.#unshuffled]
+      this.#unshuffled = null
+      this.#index = current !== null ? this.#queue.findIndex((track) => track === current) : -1
+      if (this.#index < 0) {
+        this.#offsetSec = 0
+        this.#durationSec = 0
+      }
+      this.#shuffle = false
+      this.#emit()
+      return
+    }
+    this.#unshuffled = [...this.#queue]
+    const start = this.#index >= 0 ? this.#index + 1 : 0
+    const tail = this.#queue.slice(start)
+    for (let i = tail.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      const current = tail[i]
+      const pick = tail[j]
+      if (current === undefined || pick === undefined) continue
+      tail[i] = pick
+      tail[j] = current
+    }
+    this.#queue = [...this.#queue.slice(0, start), ...tail]
+    this.#shuffle = true
+    this.#emit()
+  }
+
+  toggleShuffle(): void {
+    this.setShuffle(!this.#shuffle)
   }
 
   setVolume(linear: number): void {
@@ -453,8 +559,17 @@ export class PlaybackEngine {
     if (generation !== this.#generation) return
     this.#voice = null
 
+    if (this.#repeat === 'one' && this.#index >= 0 && this.#index < this.#queue.length) {
+      this.#beginTransition(this.#startAt(this.#index, 0))
+      return
+    }
+
     const isLast = this.#index >= this.#queue.length - 1
     if (isLast) {
+      if (this.#repeat === 'all' && this.#queue.length > 0) {
+        this.#beginTransition(this.#startAt(0, 0))
+        return
+      }
       this.#offsetSec = this.#durationSec
       this.#state = 'paused'
       this.#emit()
