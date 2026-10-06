@@ -1354,6 +1354,182 @@ p {
 
 /* ----------------------------------------------------------------- player */
 
+.player-zone {
+  display: grid;
+  gap: 8px;
+}
+
+.eq-panel {
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 14px 20px 12px;
+}
+
+.eq-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.eq-head h2 {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.eq-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.eq-preset-name {
+  color: var(--accent-bright);
+  font-weight: 600;
+}
+
+.eq-curve {
+  width: 100%;
+  height: 170px;
+  margin: 4px 0 6px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  touch-action: none;
+}
+
+.eq-curve-line {
+  fill: none;
+  stroke: var(--accent-bright);
+  stroke-width: 2;
+}
+
+.eq-grid {
+  stroke: var(--divider);
+  stroke-width: 1;
+}
+
+.eq-grid-zero {
+  stroke: var(--faint);
+  stroke-width: 1;
+}
+
+.eq-tick {
+  fill: var(--faint);
+  font-size: 11px;
+}
+
+.eq-node {
+  cursor: grab;
+}
+
+.eq-node:active {
+  cursor: grabbing;
+}
+
+.eq-node-dot {
+  fill: var(--text);
+  stroke: var(--panel-2);
+  stroke-width: 2;
+}
+
+.eq-node:hover .eq-node-dot,
+.eq-node.active .eq-node-dot {
+  fill: var(--accent-bright);
+}
+
+.eq-node-hit {
+  fill: transparent;
+}
+
+.eq-node:focus-visible {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 2px;
+}
+
+.eq-node-value {
+  fill: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.eq-hint {
+  margin: 2px 0 0;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.eq-advanced {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--divider);
+}
+
+.eq-advanced summary {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.eq-advanced summary:hover {
+  color: var(--text);
+}
+
+.eq-row {
+  display: grid;
+  grid-template-columns: 44px 1fr 52px;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.eq-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.eq-value {
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.eq-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.eq-check input {
+  accent-color: var(--accent);
+}
+
+.icon-toggle {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+}
+
+.icon-toggle:hover {
+  color: var(--text);
+  background: var(--raised);
+}
+
+.icon-toggle.active {
+  color: var(--accent-bright);
+}
+
 .player {
   position: relative;
   display: grid;

@@ -53,6 +53,7 @@ app.whenReady().then(async () => {
   ipcContext.roots = [...config.roots]
   ipcContext.theme = config.theme
   ipcContext.discogsToken = config.discogsToken
+  ipcContext.eq = config.eq
 
   createWindow()
 

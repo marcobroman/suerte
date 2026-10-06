@@ -61,7 +61,8 @@ export function AlbumGrid({ albums, query, onOpen, onPlay, onQueueNext, onQueueL
               items={[
                 { label: 'Play', onSelect: () => onPlay(album) },
                 { label: 'Play next', onSelect: () => onQueueNext(album) },
-                { label: 'Add to queue', onSelect: () => onQueueLast(album) }
+                { label: 'Add to queue', onSelect: () => onQueueLast(album) },
+                { label: 'Auto-tag…', onSelect: () => onAutoTag(album) }
               ]}
             />
           </div>

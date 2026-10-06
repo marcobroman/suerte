@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Track } from '@shared/types'
+import type { EqSettings, Track } from '@shared/types'
 import { PlaybackEngine, type EngineStatus } from './audio/engine'
 import { createWebAudioGraph } from './audio/web-audio-graph'
+import { defaultEqSettings } from './audio/settings'
 
 const IDLE_STATUS: EngineStatus = {
   state: 'idle',
@@ -9,6 +10,7 @@ const IDLE_STATUS: EngineStatus = {
   index: -1,
   queue: [],
   queueLength: 0,
+  eq: defaultEqSettings(),
   positionSec: 0,
   durationSec: 0,
   volume: 0.85,
@@ -29,6 +31,7 @@ export interface PlaybackControls {
   addLast(tracks: readonly Track[]): void
   removeAt(index: number): void
   refreshTracks(tracks: readonly Track[]): void
+  setEq(settings: EqSettings): void
   setVolume(volume: number): void
 }
 
@@ -114,6 +117,10 @@ export function usePlaybackEngine(): PlaybackControls {
     ),
     refreshTracks: useCallback(
       (tracks: readonly Track[]) => call((engine) => engine.refreshTracks(tracks)),
+      [call]
+    ),
+    setEq: useCallback(
+      (settings: EqSettings) => call((engine) => engine.setEq(settings)),
       [call]
     ),
     setVolume: useCallback((volume: number) => call((engine) => engine.setVolume(volume)), [call])

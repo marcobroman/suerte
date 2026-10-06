@@ -10,6 +10,7 @@ export const IPC = {
   getSettings: 'settings:get',
   setTheme: 'settings:set-theme',
   setDiscogsToken: 'settings:set-discogs-token',
+  setEqSettings: 'settings:set-eq',
   readFile: 'file:read',
   readCover: 'file:cover',
   revealInExplorer: 'file:reveal',
@@ -65,6 +66,7 @@ export interface IpcApi {
    * An empty value clears the stored token.
    */
   setDiscogsToken(token: unknown): Promise<AppSettings>
+  setEqSettings(eq: unknown): Promise<AppSettings>
   searchDiscogs(query: unknown): Promise<DiscogsSearchOutcome>
   getDiscogsRelease(id: unknown, kind: unknown): Promise<DiscogsReleaseOutcome>
   fetchDiscogsArt(url: unknown): Promise<DiscogsArtOutcome>

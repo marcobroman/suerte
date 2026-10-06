@@ -38,6 +38,18 @@ export interface EqSettings {
   masterVolume: number
 }
 
+/** Ten ISO bands, matching the DSP chain; also the persisted shape minus volume. */
+export const EQ_BAND_COUNT = 10
+
+/** Equalizer curve as stored in the config. Master volume stays session-only. */
+export interface PersistedEqSettings {
+  readonly bandGainsDb: readonly number[]
+  readonly preampDb: number
+  readonly autoPreamp: boolean
+  readonly bassDb: number
+  readonly trebleDb: number
+}
+
 export interface Playlist {
   readonly name: string
   readonly paths: readonly string[]
@@ -120,6 +132,8 @@ export interface AppSettings {
   readonly theme: ThemeId
   /** The Discogs token itself never leaves the main process; this only says one is stored. */
   readonly discogsTokenSet: boolean
+  /** Saved equalizer curve, without the (session-only) master volume. */
+  readonly eq: PersistedEqSettings | null
 }
 
 export interface ScanProgress {

@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { DEFAULT_THEME, isThemeId, type ThemeId } from '@shared/types'
+import { DEFAULT_THEME, EQ_BAND_COUNT, isThemeId, type PersistedEqSettings, type ThemeId } from '@shared/types'
 
 export const CONFIG_VERSION = 1
 export const CONFIG_FILE = 'library.json'
@@ -12,13 +12,15 @@ export interface AppConfig {
   readonly theme: ThemeId
   /** Discogs personal token. Never sent to the renderer; only its presence is. */
   readonly discogsToken?: string
+  readonly eq?: PersistedEqSettings
 }
 
 export const EMPTY_CONFIG: AppConfig = {
   version: CONFIG_VERSION,
   roots: [],
   theme: DEFAULT_THEME,
-  discogsToken: undefined
+  discogsToken: undefined,
+  eq: undefined
 }
 
 export function configPath(directory: string): string {
@@ -49,6 +51,35 @@ export function normalizeToken(value: unknown): string | undefined {
   return trimmed === '' ? undefined : trimmed
 }
 
+/**
+ * Shape-checks a saved EQ curve. Anything malformed means "no saved curve"
+ * rather than a half-applied one; the renderer clamps ranges on load.
+ */
+export function normalizePersistedEq(value: unknown): PersistedEqSettings | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const bands = record['bandGainsDb']
+  if (!Array.isArray(bands) || bands.length !== EQ_BAND_COUNT) return undefined
+  const bandGainsDb: number[] = []
+  for (const gain of bands) {
+    if (typeof gain !== 'number' || !Number.isFinite(gain)) return undefined
+    bandGainsDb.push(gain)
+  }
+  const preampDb = record['preampDb']
+  const bassDb = record['bassDb']
+  const trebleDb = record['trebleDb']
+  const autoPreamp = record['autoPreamp']
+  if (
+    typeof preampDb !== 'number' || !Number.isFinite(preampDb) ||
+    typeof bassDb !== 'number' || !Number.isFinite(bassDb) ||
+    typeof trebleDb !== 'number' || !Number.isFinite(trebleDb) ||
+    typeof autoPreamp !== 'boolean'
+  ) {
+    return undefined
+  }
+  return { bandGainsDb, preampDb, autoPreamp, bassDb, trebleDb }
+}
+
 /** Never throws: an unreadable or corrupt config just means "no folders chosen yet". */
 export async function loadConfig(directory: string): Promise<AppConfig> {
   let raw: string
@@ -72,7 +103,8 @@ export async function loadConfig(directory: string): Promise<AppConfig> {
     version: CONFIG_VERSION,
     roots: normalizeRoots(record.roots),
     theme: isThemeId(record.theme) ? record.theme : DEFAULT_THEME,
-    discogsToken: normalizeToken(record.discogsToken)
+    discogsToken: normalizeToken(record.discogsToken),
+    eq: normalizePersistedEq(record.eq)
   }
 }
 
@@ -85,13 +117,14 @@ export async function loadConfig(directory: string): Promise<AppConfig> {
  */
 export async function saveConfig(
   directory: string,
-  input: { readonly roots: readonly string[]; readonly theme?: ThemeId; readonly discogsToken?: string }
+  input: { readonly roots: readonly string[]; readonly theme?: ThemeId; readonly discogsToken?: string; readonly eq?: PersistedEqSettings }
 ): Promise<AppConfig> {
   const config: AppConfig = {
     version: CONFIG_VERSION,
     roots: normalizeRoots([...input.roots]),
     theme: input.theme !== undefined && isThemeId(input.theme) ? input.theme : DEFAULT_THEME,
-    discogsToken: normalizeToken(input.discogsToken)
+    discogsToken: normalizeToken(input.discogsToken),
+    eq: normalizePersistedEq(input.eq)
   }
   const target = configPath(directory)
   const temporary = `${target}.tmp`

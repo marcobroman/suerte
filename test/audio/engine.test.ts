@@ -459,6 +459,25 @@ describe('PlaybackEngine', () => {
     expect(engine.status().queueLength).toBe(0)
   })
 
+  it('reports the eq curve in status and applies updates', async () => {
+    const { engine } = makeEngine([track('a.mp3', 10)])
+
+    expect(engine.status().eq.bandGainsDb).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+
+    engine.setEq({ ...engine.eq, bandGainsDb: [3, 0, 0, 0, 0, 0, 0, 0, 0, -3] })
+
+    expect(engine.status().eq.bandGainsDb[0]).toBe(3)
+    expect(engine.status().eq.bandGainsDb[9]).toBe(-3)
+  })
+
+  it('keeps the reported curve in sync with the volume control', async () => {
+    const { engine } = makeEngine()
+
+    engine.setVolume(0.5)
+
+    expect(engine.status().eq.masterVolume).toBe(0.5)
+  })
+
   it('refreshes queued metadata without interrupting playback', async () => {
     const { engine, factory } = makeEngine([track('a.mp3', 10), track('b.mp3', 10)])
     await engine.play()

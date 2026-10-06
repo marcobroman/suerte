@@ -159,6 +159,38 @@ describe('config', () => {
     expect(await readFile(configPath(dir), 'utf8')).not.toContain('discogsToken')
   })
 
+  it('round-trips a saved eq curve', async () => {
+    const eq = {
+      bandGainsDb: [1, 2, 3, 4, 5, 4, 3, 2, 1, 0],
+      preampDb: -2,
+      autoPreamp: false,
+      bassDb: 3,
+      trebleDb: -1
+    }
+    await saveConfig(dir, { roots: ['/music'], eq })
+
+    expect((await loadConfig(dir)).eq).toEqual(eq)
+  })
+
+  it('drops malformed eq curves instead of half-applying them', async () => {
+    await saveConfig(dir, { roots: [] })
+    expect((await loadConfig(dir)).eq).toBeUndefined()
+
+    await writeFile(
+      configPath(dir),
+      JSON.stringify({ version: 1, roots: [], eq: { bandGainsDb: [1, 2], preampDb: 0, autoPreamp: true, bassDb: 0, trebleDb: 0 } }),
+      'utf8'
+    )
+    expect((await loadConfig(dir)).eq).toBeUndefined()
+
+    await writeFile(
+      configPath(dir),
+      JSON.stringify({ version: 1, roots: [], eq: { bandGainsDb: [0, 0, 0, 0, 0, 0, 0, 0, 0, 'x'], preampDb: 0, autoPreamp: true, bassDb: 0, trebleDb: 0 } }),
+      'utf8'
+    )
+    expect((await loadConfig(dir)).eq).toBeUndefined()
+  })
+
   it('keeps the theme when only roots change', async () => {
     await saveConfig(dir, { roots: ['/a'], theme: 'midnight' })
     await saveConfig(dir, { roots: ['/a', '/b'], theme: 'midnight' })

@@ -1,10 +1,10 @@
 ﻿import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { AUDIO_EXTENSIONS } from '@shared/audio-files'
 import { IPC, LIBRARY_CHANGED_CHANNEL, SCAN_PROGRESS_CHANNEL, type DiscogsArtOutcome, type DiscogsFailure, type DiscogsReleaseOutcome, type DiscogsSearchOutcome, type LibrarySummary, type TagUpdateItem, type TagUpdateOutcome } from '@shared/ipc'
-import type { LibraryTree, ScanResult, TagWriteResult, ThemeId, Track } from '@shared/types'
+import type { LibraryTree, PersistedEqSettings, ScanResult, TagWriteResult, ThemeId, Track } from '@shared/types'
 import { DEFAULT_THEME, isThemeId, type AppSettings } from '@shared/types'
 import { CoverCache, readCoverDataUrl } from './library/covers'
-import { normalizeToken, saveConfig } from './config'
+import { normalizePersistedEq, normalizeToken, saveConfig } from './config'
 import { createDiscogsClient, DiscogsError } from './discogs'
 import { LibraryCache } from './library/cache'
 import { findMissingRoots } from './library/roots'
@@ -23,6 +23,7 @@ export interface IpcContext {
   scanning: boolean
   theme: ThemeId
   discogsToken: string | undefined
+  eq: PersistedEqSettings | undefined
   tree: LibraryTree
   tracks: readonly Track[]
   readonly cache: LibraryCache
@@ -41,6 +42,7 @@ export function createIpcContext(
     scanning: false,
     theme,
     discogsToken: undefined,
+    eq: undefined,
     tree: { artists: [], albums: [] },
     tracks: [],
     cache: new LibraryCache(),
@@ -78,6 +80,9 @@ async function runScan(context: IpcContext): Promise<ScanResult> {  if (context.
     })
     context.tree = outcome.tree
     context.tracks = outcome.tracks
+    // Covers are cached by path with no mtime check, so any rescan — tag edits
+    // included — must drop them; they reload lazily on demand.
+    context.covers.clear()
     // Reported rather than pruned: a detached drive comes back on its own.
     context.missingRoots = await findMissingRoots(context.roots)
     broadcastLibrary(context)
@@ -102,9 +107,13 @@ function summarize(context: IpcContext): LibrarySummary {
   }
 }
 
-/** The token itself never leaves main; renderers only learn whether one is stored. */
+/** The token and EQ curve never leave main in raw form; renderers get presence flags and copies. */
 function settingsOf(context: IpcContext): AppSettings {
-  return { theme: context.theme, discogsTokenSet: context.discogsToken !== undefined }
+  return {
+    theme: context.theme,
+    discogsTokenSet: context.discogsToken !== undefined,
+    eq: context.eq ? { ...context.eq, bandGainsDb: [...context.eq.bandGainsDb] } : null
+  }
 }
 
 function discogsFailure(error: unknown): DiscogsFailure {
@@ -120,7 +129,8 @@ export function registerIpc(context: IpcContext): void {
     saveConfig(context.configDir, {
       roots: context.roots,
       theme: context.theme,
-      discogsToken: context.discogsToken
+      discogsToken: context.discogsToken,
+      eq: context.eq
     })
 
   ipcMain.handle(IPC.pickFolders, async () => {
@@ -169,6 +179,16 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
   ipcMain.handle(IPC.setDiscogsToken, async (_event, token: unknown): Promise<AppSettings> => {
     context.discogsToken = normalizeToken(token)
     await persistConfig()
+    return settingsOf(context)
+  })
+
+  ipcMain.handle(IPC.setEqSettings, async (_event, eq: unknown): Promise<AppSettings> => {
+    // Malformed curves are ignored rather than wiping a good saved one.
+    const normalized = normalizePersistedEq(eq)
+    if (normalized !== undefined) {
+      context.eq = normalized
+      await persistConfig()
+    }
     return settingsOf(context)
   })
 

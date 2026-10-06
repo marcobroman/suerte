@@ -26,6 +26,8 @@ const api: IpcApi = {
     ipcRenderer.invoke(IPC.updateTags, items) as Promise<TagUpdateOutcome>,
   setDiscogsToken: (token: unknown) =>
     ipcRenderer.invoke(IPC.setDiscogsToken, token) as Promise<AppSettings>,
+  setEqSettings: (eq: unknown) =>
+    ipcRenderer.invoke(IPC.setEqSettings, eq) as Promise<AppSettings>,
   searchDiscogs: (query: unknown) =>
     ipcRenderer.invoke(IPC.searchDiscogs, query) as Promise<DiscogsSearchOutcome>,
   getDiscogsRelease: (id: unknown, kind: unknown) =>

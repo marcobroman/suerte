@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { LibrarySummary } from '@shared/ipc'
-import type { Album, ThemeId } from '@shared/types'
+import type { Album, EqSettings, PersistedEqSettings, ThemeId, Track } from '@shared/types'
+import { extensionOf } from '@shared/audio-files'
 import { formatDuration } from './format'
 import { AlbumGrid } from './library/AlbumGrid'
 import { AlbumView } from './library/AlbumView'
+import { AutoTagDialog } from './library/AutoTagDialog'
+import { EqPanel } from './library/EqPanel'
 import { NowPlayingBar } from './library/NowPlayingBar'
 import { OverflowMenu } from './library/OverflowMenu'
 import { Sidebar } from './library/Sidebar'
 import { SortControl } from './library/SortControl'
 import { applyTheme, resolveTheme, THEME_OPTIONS } from './library/themes'
+import { autoTagFilesOf, buildAutoTagQuery } from './library/autotag'
+import { eqPresetById } from './library/eqPresets'
+import { defaultEqSettings, normalizeEqSettings } from './audio/settings'
 import {
   ALL_SELECTION,
   ALBUM_SORT_OPTIONS,
@@ -39,6 +45,14 @@ export function App() {
   const [tokenMessage, setTokenMessage] = useState('')
   const [sortKey, setSortKey] = useState<AlbumSortKey>('artist')
   const [sortDir, setSortDir] = useState<AlbumSortDir>('asc')
+  const [autoTag, setAutoTag] = useState<{
+    tracks: readonly Track[]
+    skipped: number
+    initialQuery: string
+  } | null>(null)
+  const [eqOpen, setEqOpen] = useState(false)
+  const [activePresetId, setActivePresetId] = useState<string | null>(null)
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
   // Selection history, so drilling into an artist and then an album can be undone.
   const [history, setHistory] = useState<readonly Selection[]>([ALL_SELECTION])
   const [cursor, setCursor] = useState(0)
@@ -100,6 +114,13 @@ export function App() {
         applyTheme(resolved, document.documentElement)
         setThemeState(resolved)
         setDiscogsTokenSet(settings.discogsTokenSet)
+        if (settings.eq) {
+          playbackRef.current.setEq({
+            ...normalizeEqSettings(settings.eq),
+            masterVolume: playbackRef.current.status.volume
+          })
+        }
+        setSettingsLoaded(true)
       })
       .catch(() => undefined)
   }, [])
@@ -267,6 +288,36 @@ export function App() {
     playback.addLast([...view.tracks])
   }, [view.tracks, playback])
 
+  const openAutoTagTracks = useCallback((tracks: readonly Track[]) => {
+    const writable = tracks.filter((track) => extensionOf(track.path) === '.mp3')
+    setAutoTag({
+      tracks: writable,
+      skipped: tracks.length - writable.length,
+      initialQuery: buildAutoTagQuery(autoTagFilesOf(tracks))
+    })
+  }, [])
+
+  const autoTagVisibleAlbum = useCallback(() => {
+    if (view.tracks.length === 0) return
+    openAutoTagTracks(view.tracks)
+  }, [view.tracks, openAutoTagTracks])
+
+  const autoTagVisibleTrack = useCallback(
+    (trackIndex: number) => {
+      const track = view.tracks[trackIndex]
+      if (!track) return
+      openAutoTagTracks([track])
+    },
+    [view.tracks, openAutoTagTracks]
+  )
+
+  const autoTagGridAlbum = useCallback(
+    (album: Album) => {
+      openAutoTagTracks(tracksForAlbum(index, album))
+    },
+    [index, openAutoTagTracks]
+  )
+
   const togglePlayback = useCallback(() => {
     // First play ever: the queue is still empty, so start what is on screen.
     if (playback.status.queueLength === 0) {
@@ -310,6 +361,61 @@ export function App() {
   useEffect(() => {
     if (summary) playbackRef.current.refreshTracks(summary.tracks)
   }, [summary])
+
+  const updateEq = useCallback(
+    (patch: Partial<EqSettings>) => {
+      // Any hand tweak leaves the preset behind; the header shows it only while exact.
+      setActivePresetId(null)
+      playback.setEq({ ...playback.status.eq, ...patch })
+    },
+    [playback]
+  )
+
+  const applyEqPreset = useCallback(
+    (presetId: string) => {
+      const preset = eqPresetById(presetId)
+      if (!preset) return
+      setActivePresetId(presetId)
+      playback.setEq({
+        ...playback.status.eq,
+        bandGainsDb: [...preset.bandGainsDb],
+        bassDb: preset.bassDb,
+        trebleDb: preset.trebleDb
+      })
+    },
+    [playback]
+  )
+
+  const resetEq = useCallback(() => {
+    setActivePresetId('flat')
+    playback.setEq({ ...defaultEqSettings(), masterVolume: playback.status.volume })
+  }, [playback])
+
+  // Persisted debounced, and only after the saved curve has loaded, so the
+  // flat defaults can never overwrite a stored curve on startup.
+  const lastSavedEq = useRef<string | null>(null)
+  useEffect(() => {
+    if (!settingsLoaded) return
+    const eq = playback.status.eq
+    const persisted: PersistedEqSettings = {
+      bandGainsDb: [...eq.bandGainsDb],
+      preampDb: eq.preampDb,
+      autoPreamp: eq.autoPreamp,
+      bassDb: eq.bassDb,
+      trebleDb: eq.trebleDb
+    }
+    const key = JSON.stringify(persisted)
+    if (key === lastSavedEq.current) return
+    const timer = setTimeout(() => {
+      void window.equalizer.setEqSettings(persisted).then(
+        () => {
+          lastSavedEq.current = key
+        },
+        () => undefined
+      )
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [settingsLoaded, playback.status.eq])
 
   const openSearchAlbum = useCallback(
     (album: Album) => {
@@ -601,6 +707,7 @@ export function App() {
                       onPlay={playAlbum}
                       onQueueNext={queueAlbumNext}
                       onQueueLast={queueAlbumLast}
+                      onAutoTag={autoTagGridAlbum}
                     />
                   </>
                 )}
@@ -682,6 +789,7 @@ export function App() {
                   onPlay={playAlbum}
                   onQueueNext={queueAlbumNext}
                   onQueueLast={queueAlbumLast}
+                  onAutoTag={autoTagGridAlbum}
                 />
               </>
             ) : (
@@ -697,6 +805,8 @@ export function App() {
                 onAddLast={queueTrackLast}
                 onQueueAlbumNext={queueVisibleNext}
                 onQueueAlbumLast={queueVisibleLast}
+                onAutoTagAlbum={autoTagVisibleAlbum}
+                onAutoTagTrack={autoTagVisibleTrack}
                 onReveal={reveal}
               />
             )}
@@ -704,19 +814,40 @@ export function App() {
         </main>
       </div>
 
-      <NowPlayingBar
+      <div className="player-zone">
+        {eqOpen && (
+          <EqPanel
+            eq={playback.status.eq}
+            activePresetId={activePresetId}
+            onChange={updateEq}
+            onPreset={applyEqPreset}
+            onReset={resetEq}
+          />
+        )}
+        <NowPlayingBar
           track={playback.status.track}
           state={playback.status.state}
           positionSec={playback.positionSec}
           durationSec={playback.status.durationSec}
           volume={playback.status.volume}
           canPlay={canPlay}
+          eqOpen={eqOpen}
           onToggle={togglePlayback}
           onNext={playback.next}
           onPrevious={playback.previous}
           onSeek={playback.seek}
           onVolume={playback.setVolume}
+          onToggleEq={() => setEqOpen((open) => !open)}
         />
+      </div>
+      {autoTag && (
+        <AutoTagDialog
+          files={autoTagFilesOf(autoTag.tracks)}
+          skipped={autoTag.skipped}
+          initialQuery={autoTag.initialQuery}
+          onClose={() => setAutoTag(null)}
+        />
+      )}
     </div>
   )
 }

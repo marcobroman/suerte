@@ -34,7 +34,19 @@ export function clampMasterVolume(volume: number): number {
 }
 
 /** Coerces anything loaded from disk into a usable, in-range settings object. */
-export function normalizeEqSettings(input: Partial<EqSettings> | null | undefined): EqSettings {
+export function normalizeEqSettings(
+  input:
+    | {
+        readonly bandGainsDb?: readonly number[]
+        readonly preampDb?: number
+        readonly autoPreamp?: boolean
+        readonly bassDb?: number
+        readonly trebleDb?: number
+        readonly masterVolume?: number
+      }
+    | null
+    | undefined
+): EqSettings {
   const source = input ?? {}
   const bands = Array.isArray(source.bandGainsDb) ? source.bandGainsDb : []
   const bandGainsDb = Array.from({ length: 10 }, (_, index) => {

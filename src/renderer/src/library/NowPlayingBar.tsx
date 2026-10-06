@@ -11,11 +11,13 @@ export interface NowPlayingBarProps {
   readonly durationSec: number
   readonly volume: number
   readonly canPlay: boolean
+  readonly eqOpen: boolean
   onToggle(): void
   onNext(): void
   onPrevious(): void
   onSeek(seconds: number): void
   onVolume(volume: number): void
+  onToggleEq(): void
 }
 
 /**
@@ -29,11 +31,13 @@ export function NowPlayingBar({
   durationSec,
   volume,
   canPlay,
+  eqOpen,
   onToggle,
   onNext,
   onPrevious,
   onSeek,
-  onVolume
+  onVolume,
+  onToggleEq
 }: NowPlayingBarProps) {
   const playing = state === 'playing'
   const loading = state === 'loading'
@@ -103,6 +107,21 @@ export function NowPlayingBar({
           />
         </svg>
         <Slider value={volume} max={1} step={0.01} label="Volume" onChange={onVolume} />
+        <button
+          type="button"
+          className={eqOpen ? 'icon-toggle active' : 'icon-toggle'}
+          onClick={onToggleEq}
+          aria-label={eqOpen ? 'Hide equalizer' : 'Show equalizer'}
+          aria-expanded={eqOpen}
+          title="Equalizer"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path
+              d="M4 6h10v2H4zm0 5h16v2H4zm0 5h10v2H4zM17 8l5 3-5 3z"
+              fill="currentColor"
+            />
+          </svg>
+        </button>
       </div>
 
       {state === 'error' && <p className="player-error">Playback failed</p>}

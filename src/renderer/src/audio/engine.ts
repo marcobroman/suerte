@@ -12,6 +12,7 @@ export interface EngineStatus {
   readonly index: number
   readonly queue: readonly Track[]
   readonly queueLength: number
+  readonly eq: EqSettings
   readonly positionSec: number
   readonly durationSec: number
   readonly volume: number
@@ -89,6 +90,7 @@ export class PlaybackEngine {
       index: this.#index,
       queue: [...this.#queue],
       queueLength: this.#queue.length,
+      eq: { ...this.#eq, bandGainsDb: [...this.#eq.bandGainsDb] },
       positionSec: this.position(),
       durationSec: this.#durationSec,
       volume: this.#volume,
@@ -345,6 +347,9 @@ export class PlaybackEngine {
 
   setVolume(linear: number): void {
     this.#volume = clampMasterVolume(linear)
+    // Keep the reported curve in sync so a later band tweak cannot resurrect an
+    // older volume through a stale masterVolume.
+    this.#eq = { ...this.#eq, masterVolume: this.#volume }
     this.#graph?.setMasterVolume(this.#volume)
     this.#emit()
   }
