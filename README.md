@@ -1,6 +1,6 @@
-# Suerte
+# Onda
 
-Suerte is a desktop music player and library app built with Electron, React, and TypeScript. Scan local music folders, browse by artist and album, manage a playback queue, shape the sound with a 10-band graphic EQ, and fix up MP3 tags — by hand or automatically via Discogs.
+Onda is a desktop music player and library app built with Electron, React, and TypeScript. Scan local music folders, browse by artist and album, manage a playback queue, shape the sound with a 10-band graphic EQ, and fix up MP3 tags — by hand or automatically via Discogs.
 
 The project follows a local-first workflow: the main process owns the library index and filesystem access, exposes a narrow typed IPC surface to the sandboxed renderer, and persists settings between launches.
 

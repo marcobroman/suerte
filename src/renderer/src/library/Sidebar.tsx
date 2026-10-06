@@ -58,12 +58,24 @@ export function Sidebar({
   }, [queue.length])
   const activeArtist = selection.kind === 'artist' ? selection.artist : null
   const activeAlbumKey = selection.kind === 'album' ? selection.albumKey : null
+  const listRef = useRef<HTMLOListElement | null>(null)
+  // Chronological queue with the view scrolled to what's playing on expand,
+  // so played tracks sit on top and the current track is still visible.
+  useEffect(() => {
+    if (!queueOpen) return
+    const list = listRef.current
+    const active = list?.querySelector('.queue-side-row.active') as HTMLElement | null
+    if (!list || !active) return
+    const listRect = list.getBoundingClientRect()
+    const rowRect = active.getBoundingClientRect()
+    list.scrollTop += rowRect.top - listRect.top - list.clientHeight / 2 + rowRect.height / 2
+  }, [queueOpen])
 
   return (
     <aside className="sidebar">
       {/* <div className="brand">
         <span className="brand-mark" aria-hidden="true" />
-        <span className="brand-name">Suerte</span>
+        <span className="brand-name">Onda</span>
       </div> */}
 
       <nav aria-label="Library">
@@ -114,7 +126,7 @@ export function Sidebar({
           aria-label={queueOpen ? 'Collapse queue' : 'Expand queue'}
         >
           <span className="nav-label queue-side-label">
-            Up next{queue.length > 0 ? ` · ${queue.length}` : ''}
+            Queue{queue.length > 0 ? ` · ${queue.length}` : ''}
           </span>
           <span className="queue-chevron" aria-hidden="true">
             {queueOpen ? '▾' : '▸'}
@@ -124,19 +136,26 @@ export function Sidebar({
           (queue.length === 0 ? (
             <p className="nav-empty">Nothing queued yet</p>
           ) : (
-            <ol className="queue-side-list">
+            <ol ref={listRef} className="queue-side-list">
               {queue.map((track, listIndex) => {
                 const active = listIndex === currentIndex
+                const wasPlayed = listIndex < currentIndex
                 return (
                   <li
                     key={`${track.path}#${listIndex}`}
-                    className={active ? 'queue-side-row active' : 'queue-side-row'}
+                    className={
+                      active
+                        ? 'queue-side-row active'
+                        : wasPlayed
+                          ? 'queue-side-row played'
+                          : 'queue-side-row'
+                    }
                   >
                     <button
                       type="button"
                       className="queue-side-play"
                       onClick={() => onPlayAt(listIndex)}
-                      aria-label={`Play ${track.title}`}
+                      aria-label={wasPlayed ? `Replay ${track.title}` : `Play ${track.title}`}
                       title={`${track.title} — ${track.artist || 'Unknown artist'}`}
                     >
                       <span className="queue-side-title">{track.title}</span>

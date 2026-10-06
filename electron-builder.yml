@@ -1,5 +1,5 @@
-appId: com.equalizer.app
-productName: Equalizer
+appId: com.onda.app
+productName: Onda
 directories:
   buildResources: build
   output: release

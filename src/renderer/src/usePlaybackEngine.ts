@@ -69,7 +69,9 @@ export function usePlaybackEngine(): PlaybackControls {
     }
   }, [])
 
-  // The engine only reports on transitions, so the clock is sampled per frame.
+  // The engine only reports on transitions, so the clock is sampled per frame
+  // while playing. The snapshot branch re-runs on every engine emit — not just
+  // state flips — so seeks made while paused visibly move the slider at once.
   useEffect(() => {
     if (status.state !== 'playing') {
       setPositionSec(engineRef.current?.position() ?? 0)
@@ -82,7 +84,7 @@ export function usePlaybackEngine(): PlaybackControls {
     }
     frame = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(frame)
-  }, [status.state])
+  }, [status])
 
   const call = useCallback((action: (engine: PlaybackEngine) => void) => {
     const engine = engineRef.current

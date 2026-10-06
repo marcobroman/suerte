@@ -25,6 +25,23 @@ export function EqPanel({ eq, activePresetId, onChange, onPreset, onReset }: EqP
 
   const activePreset = EQ_PRESETS.find((preset) => preset.id === activePresetId)
 
+  const sideControl = (
+    label: string,
+    value: number,
+    min: number,
+    max: number,
+    sliderLabel: string,
+    onPick: (value: number) => void
+  ) => (
+    <div key={label} className="eq-side-control">
+      <div className="eq-side-label">
+        <span>{label}</span>
+        <span className="eq-value">{formatDb(value)}</span>
+      </div>
+      <Slider value={value} min={min} max={max} step={0.5} label={sliderLabel} onChange={onPick} />
+    </div>
+  )
+
   return (
     <section className="eq-panel" aria-label="Equalizer">
       <header className="eq-head">
@@ -54,61 +71,43 @@ export function EqPanel({ eq, activePresetId, onChange, onPreset, onReset }: EqP
         </div>
       </header>
 
-      <EqCurvePlot
-        eq={eq}
-        onBandGain={(index, gainDb) => setBand(index, gainDb)}
-        onBandReset={(index) => setBand(index, 0)}
-      />
+      <div className="eq-body">
+        <div className="eq-main">
+          <EqCurvePlot
+            eq={eq}
+            onBandGain={(index, gainDb) => setBand(index, gainDb)}
+            onBandReset={(index) => setBand(index, 0)}
+          />
 
-      <p className="eq-hint">Drag the nodes on the curve — double-click one to reset its band.</p>
+          <p className="eq-hint">Drag the nodes on the curve — double-click one to reset its band.</p>
+        </div>
 
-      <details className="eq-advanced">
-        <summary>Tone &amp; headroom</summary>
-        <div className="eq-row">
-          <span className="eq-label">Pre</span>
-          <Slider
-            value={eq.preampDb}
-            min={PREAMP_MIN_DB}
-            max={PREAMP_MAX_DB}
-            step={0.5}
-            label="Preamp"
-            onChange={(preampDb) => onChange({ preampDb })}
-          />
-          <span className="eq-value">{formatDb(eq.preampDb)}</span>
-        </div>
-        <div className="eq-row">
-          <span className="eq-label">Bass</span>
-          <Slider
-            value={eq.bassDb}
-            min={SHELF_GAIN_MIN_DB}
-            max={SHELF_GAIN_MAX_DB}
-            step={0.5}
-            label="Bass shelf"
-            onChange={(bassDb) => onChange({ bassDb })}
-          />
-          <span className="eq-value">{formatDb(eq.bassDb)}</span>
-        </div>
-        <div className="eq-row">
-          <span className="eq-label">Treble</span>
-          <Slider
-            value={eq.trebleDb}
-            min={SHELF_GAIN_MIN_DB}
-            max={SHELF_GAIN_MAX_DB}
-            step={0.5}
-            label="Treble shelf"
-            onChange={(trebleDb) => onChange({ trebleDb })}
-          />
-          <span className="eq-value">{formatDb(eq.trebleDb)}</span>
-        </div>
-        <label className="eq-check">
-          <input
-            type="checkbox"
-            checked={eq.autoPreamp}
-            onChange={(event) => onChange({ autoPreamp: event.target.checked })}
-          />{' '}
-          Auto preamp (prevents clipping)
-        </label>
-      </details>
+        <aside className="eq-side" aria-label="Tone and headroom">
+          <h3>Tone &amp; headroom</h3>
+          {sideControl('Pre', eq.preampDb, PREAMP_MIN_DB, PREAMP_MAX_DB, 'Preamp', (preampDb) =>
+            onChange({ preampDb })
+          )}
+          {sideControl('Bass', eq.bassDb, SHELF_GAIN_MIN_DB, SHELF_GAIN_MAX_DB, 'Bass shelf', (bassDb) =>
+            onChange({ bassDb })
+          )}
+          {sideControl(
+            'Treble',
+            eq.trebleDb,
+            SHELF_GAIN_MIN_DB,
+            SHELF_GAIN_MAX_DB,
+            'Treble shelf',
+            (trebleDb) => onChange({ trebleDb })
+          )}
+          <label className="eq-check" title="Keeps boosted EQ from clipping the output">
+            <input
+              type="checkbox"
+              checked={eq.autoPreamp}
+              onChange={(event) => onChange({ autoPreamp: event.target.checked })}
+            />{' '}
+            Auto preamp
+          </label>
+        </aside>
+      </div>
     </section>
   )
 }
