@@ -12,3 +12,11 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+mac:
+  category: public.app-category.music
+  # arm64 covers Apple Silicon, x64 covers older Intel Macs.
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
