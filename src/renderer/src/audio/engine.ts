@@ -412,9 +412,11 @@ export class PlaybackEngine {
   }
 
   /**
-   * Shuffles only what comes after the current track, which keeps playing
-   * untouched. With nothing selected the whole queue shuffles. Toggling off
-   * restores the pre-shuffle order with the current track re-anchored.
+   * Shuffles the queue with the current track first, so Up next reads top to
+   * bottom from what's playing. Playback itself never jumps: the voice keeps
+   * running and only bookkeeping changes. With nothing selected the whole
+   * queue shuffles. Toggling off restores the pre-shuffle order with the
+   * current track re-anchored.
    */
   setShuffle(on: boolean): void {
     if (on === this.#shuffle) return
@@ -431,18 +433,19 @@ export class PlaybackEngine {
       this.#emit()
       return
     }
+    const current = this.#index >= 0 ? (this.#queue[this.#index] ?? null) : null
     this.#unshuffled = [...this.#queue]
-    const start = this.#index >= 0 ? this.#index + 1 : 0
-    const tail = this.#queue.slice(start)
-    for (let i = tail.length - 1; i > 0; i--) {
+    const rest = this.#queue.filter((track) => track !== current)
+    for (let i = rest.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1))
-      const current = tail[i]
-      const pick = tail[j]
-      if (current === undefined || pick === undefined) continue
-      tail[i] = pick
-      tail[j] = current
+      const atI = rest[i]
+      const atJ = rest[j]
+      if (atI === undefined || atJ === undefined) continue
+      rest[i] = atJ
+      rest[j] = atI
     }
-    this.#queue = [...this.#queue.slice(0, start), ...tail]
+    this.#queue = current !== null ? [current, ...rest] : rest
+    this.#index = current !== null ? 0 : -1
     this.#shuffle = true
     this.#emit()
   }

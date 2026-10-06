@@ -629,17 +629,30 @@ describe('PlaybackEngine', () => {
     expect(factory.current.voices).toHaveLength(2)
   })
 
-  it('shuffles upcoming tracks while the current one holds still', async () => {
+  it('shuffles the queue with the current track on top', async () => {
     const paths = ['a.mp3', 'b.mp3', 'c.mp3', 'd.mp3', 'e.mp3', 'f.mp3']
     const { engine } = makeEngine(paths.map((path) => track(path, 10)))
     await engine.play()
+    await engine.next()
 
     engine.setShuffle(true)
 
     expect(engine.status().shuffle).toBe(true)
+    // Playback never jumps: the same track keeps playing, now at the top.
     expect(engine.status().index).toBe(0)
-    expect(engine.status().track?.path).toBe('a.mp3')
+    expect(engine.status().track?.path).toBe('b.mp3')
     expect(engine.state).toBe('playing')
+    expect([...engine.status().queue.map((t) => t.path)].sort()).toEqual([...paths].sort())
+  })
+
+  it('shuffles everything when nothing is selected', () => {
+    const paths = ['a.mp3', 'b.mp3', 'c.mp3']
+    const { engine } = makeEngine(paths.map((path) => track(path, 10)))
+
+    engine.setShuffle(true)
+
+    expect(engine.status().shuffle).toBe(true)
+    expect(engine.status().index).toBe(-1)
     expect([...engine.status().queue.map((t) => t.path)].sort()).toEqual([...paths].sort())
   })
 
