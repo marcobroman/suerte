@@ -1,8 +1,9 @@
-﻿import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
+﻿import { randomBytes } from 'node:crypto'
+import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { AUDIO_EXTENSIONS } from '@shared/audio-files'
 import { IPC, LIBRARY_CHANGED_CHANNEL, SCAN_PROGRESS_CHANNEL, type DiscogsArtOutcome, type DiscogsFailure, type DiscogsReleaseOutcome, type DiscogsSearchOutcome, type LibrarySummary, type TagUpdateItem, type TagUpdateOutcome } from '@shared/ipc'
-import type { LibraryTree, PersistedEqSettings, ScanResult, TagWriteResult, ThemeId, Track } from '@shared/types'
-import { DEFAULT_THEME, isThemeId, type AppSettings } from '@shared/types'
+import type { LibraryTree, PersistedEqSettings, ScanResult, ServerConfig, TagWriteResult, ThemeId, Track } from '@shared/types'
+import { DEFAULT_SERVER_PORT, DEFAULT_THEME, isThemeId, type AppSettings } from '@shared/types'
 import { CoverCache, readCoverDataUrl } from './library/covers'
 import { normalizePersistedEq, normalizeToken, saveConfig } from './config'
 import { createDiscogsClient, DiscogsError } from './discogs'
@@ -10,6 +11,7 @@ import { LibraryCache } from './library/cache'
 import { findMissingRoots } from './library/roots'
 import { scanLibrary } from './library/scan'
 import { sanitizeTagEdits, writeTrackTags } from './library/tags'
+import { lanBaseUrl, type LibraryServer } from './server'
 import { readAudioBytes } from './util/read-bytes'
 
 /**
@@ -24,6 +26,9 @@ export interface IpcContext {
   theme: ThemeId
   discogsToken: string | undefined
   eq: PersistedEqSettings | undefined
+  serverConfig: ServerConfig
+  /** Running LAN server, if enabled. Owned by main/index.ts lifecycle. */
+  server: LibraryServer | null
   tree: LibraryTree
   tracks: readonly Track[]
   readonly cache: LibraryCache
@@ -43,6 +48,8 @@ export function createIpcContext(
     theme,
     discogsToken: undefined,
     eq: undefined,
+    serverConfig: { enabled: false, port: DEFAULT_SERVER_PORT, token: undefined },
+    server: null,
     tree: { artists: [], albums: [] },
     tracks: [],
     cache: new LibraryCache(),
@@ -63,6 +70,7 @@ function broadcastLibrary(context: IpcContext): void {
   for (const target of BrowserWindow.getAllWindows()) {
     target.webContents.send(LIBRARY_CHANGED_CHANNEL, summary)
   }
+  context.server?.pushLibraryChanged()
 }
 
 async function runScan(context: IpcContext): Promise<ScanResult> {  if (context.scanning) {
@@ -107,12 +115,30 @@ function summarize(context: IpcContext): LibrarySummary {
   }
 }
 
-/** The token and EQ curve never leave main in raw form; renderers get presence flags and copies. */
+/** Tokens and curves never leave main in raw form; renderers get presence flags and copies. */
 function settingsOf(context: IpcContext): AppSettings {
+  const server = context.server
   return {
     theme: context.theme,
     discogsTokenSet: context.discogsToken !== undefined,
-    eq: context.eq ? { ...context.eq, bandGainsDb: [...context.eq.bandGainsDb] } : null
+    eq: context.eq ? { ...context.eq, bandGainsDb: [...context.eq.bandGainsDb] } : null,
+    server: {
+      enabled: context.serverConfig.enabled,
+      port: context.serverConfig.port,
+      tokenSet: context.serverConfig.token !== undefined,
+      url:
+        context.serverConfig.enabled && server?.listening
+          ? (lanBaseUrl(context.serverConfig.port) ?? `http://localhost:${context.serverConfig.port}`)
+          : null
+    }
+  }
+}
+
+function serverConfigOf(context: IpcContext): ServerConfig {
+  return {
+    enabled: context.serverConfig.enabled,
+    port: context.serverConfig.port,
+    token: context.serverConfig.token
   }
 }
 
@@ -130,7 +156,8 @@ export function registerIpc(context: IpcContext): void {
       roots: context.roots,
       theme: context.theme,
       discogsToken: context.discogsToken,
-      eq: context.eq
+      eq: context.eq,
+      server: serverConfigOf(context)
     })
 
   ipcMain.handle(IPC.pickFolders, async () => {
@@ -191,6 +218,52 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
     }
     return settingsOf(context)
   })
+
+  ipcMain.handle(IPC.setServerEnabled, async (_event, on: unknown): Promise<AppSettings> => {
+    if (typeof on !== 'boolean') return settingsOf(context)
+    context.serverConfig = { ...context.serverConfig, enabled: on }
+    if (on && context.serverConfig.token === undefined) {
+      context.serverConfig = { ...context.serverConfig, token: randomBytes(32).toString('hex') }
+    }
+    await persistConfig()
+    if (on) {
+      try {
+        await context.server?.start()
+      } catch {
+        // A taken port leaves the server stopped; the URL stays null so the
+        // UI shows it as unreachable instead of pretending otherwise.
+      }
+    } else {
+      await context.server?.stop()
+    }
+    return settingsOf(context)
+  })
+
+  ipcMain.handle(IPC.setServerPort, async (_event, port: unknown): Promise<AppSettings> => {
+    if (typeof port !== 'number' || !Number.isInteger(port) || port < 1024 || port > 65535) {
+      return settingsOf(context)
+    }
+    if (port === context.serverConfig.port) return settingsOf(context)
+    context.serverConfig = { ...context.serverConfig, port }
+    await persistConfig()
+    if (context.server?.listening) {
+      await context.server.stop()
+      try {
+        await context.server.start()
+      } catch {
+        // Same taken-port story as enabling: stopped with a null URL.
+      }
+    }
+    return settingsOf(context)
+  })
+
+  ipcMain.handle(IPC.regenerateServerToken, async (): Promise<AppSettings> => {
+    context.serverConfig = { ...context.serverConfig, token: randomBytes(32).toString('hex') }
+    await persistConfig()
+    return settingsOf(context)
+  })
+
+  ipcMain.handle(IPC.getServerToken, (): string | null => context.serverConfig.token ?? null)
 
   ipcMain.handle(IPC.readFile, (_event, path: string) => readAudioBytes(path))
 

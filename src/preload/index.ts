@@ -28,6 +28,13 @@ const api: IpcApi = {
     ipcRenderer.invoke(IPC.setDiscogsToken, token) as Promise<AppSettings>,
   setEqSettings: (eq: unknown) =>
     ipcRenderer.invoke(IPC.setEqSettings, eq) as Promise<AppSettings>,
+  setServerEnabled: (on: unknown) =>
+    ipcRenderer.invoke(IPC.setServerEnabled, on) as Promise<AppSettings>,
+  setServerPort: (port: unknown) =>
+    ipcRenderer.invoke(IPC.setServerPort, port) as Promise<AppSettings>,
+  regenerateServerToken: () =>
+    ipcRenderer.invoke(IPC.regenerateServerToken) as Promise<AppSettings>,
+  getServerToken: () => ipcRenderer.invoke(IPC.getServerToken) as Promise<string | null>,
   searchDiscogs: (query: unknown) =>
     ipcRenderer.invoke(IPC.searchDiscogs, query) as Promise<DiscogsSearchOutcome>,
   getDiscogsRelease: (id: unknown, kind: unknown) =>

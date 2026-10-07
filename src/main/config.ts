@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { DEFAULT_THEME, EQ_BAND_COUNT, isThemeId, type PersistedEqSettings, type ThemeId } from '@shared/types'
+import { DEFAULT_SERVER_PORT, DEFAULT_THEME, EQ_BAND_COUNT, isThemeId, type PersistedEqSettings, type ServerConfig, type ThemeId } from '@shared/types'
 
 export const CONFIG_VERSION = 1
 export const CONFIG_FILE = 'library.json'
@@ -13,6 +13,7 @@ export interface AppConfig {
   /** Discogs personal token. Never sent to the renderer; only its presence is. */
   readonly discogsToken?: string
   readonly eq?: PersistedEqSettings
+  readonly server?: ServerConfig
 }
 
 export const EMPTY_CONFIG: AppConfig = {
@@ -20,7 +21,8 @@ export const EMPTY_CONFIG: AppConfig = {
   roots: [],
   theme: DEFAULT_THEME,
   discogsToken: undefined,
-  eq: undefined
+  eq: undefined,
+  server: undefined
 }
 
 export function configPath(directory: string): string {
@@ -104,7 +106,23 @@ export async function loadConfig(directory: string): Promise<AppConfig> {
     roots: normalizeRoots(record.roots),
     theme: isThemeId(record.theme) ? record.theme : DEFAULT_THEME,
     discogsToken: normalizeToken(record.discogsToken),
-    eq: normalizePersistedEq(record.eq)
+    eq: normalizePersistedEq(record.eq),
+    server: normalizeServerConfig(record.server)
+  }
+}
+
+/** A bad port falls back instead of dropping the whole section (and its token). */
+export function normalizeServerConfig(value: unknown): ServerConfig | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const port = record['port']
+  return {
+    enabled: record['enabled'] === true,
+    port:
+      typeof port === 'number' && Number.isInteger(port) && port >= 1024 && port <= 65535
+        ? port
+        : DEFAULT_SERVER_PORT,
+    token: normalizeToken(record['token'])
   }
 }
 
@@ -117,14 +135,15 @@ export async function loadConfig(directory: string): Promise<AppConfig> {
  */
 export async function saveConfig(
   directory: string,
-  input: { readonly roots: readonly string[]; readonly theme?: ThemeId; readonly discogsToken?: string; readonly eq?: PersistedEqSettings }
+  input: { readonly roots: readonly string[]; readonly theme?: ThemeId; readonly discogsToken?: string; readonly eq?: PersistedEqSettings; readonly server?: ServerConfig }
 ): Promise<AppConfig> {
   const config: AppConfig = {
     version: CONFIG_VERSION,
     roots: normalizeRoots([...input.roots]),
     theme: input.theme !== undefined && isThemeId(input.theme) ? input.theme : DEFAULT_THEME,
     discogsToken: normalizeToken(input.discogsToken),
-    eq: normalizePersistedEq(input.eq)
+    eq: normalizePersistedEq(input.eq),
+    server: normalizeServerConfig(input.server)
   }
   const target = configPath(directory)
   const temporary = `${target}.tmp`

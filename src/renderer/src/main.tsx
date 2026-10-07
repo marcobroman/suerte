@@ -8,6 +8,6 @@ if (!container) throw new Error('missing #root element')
 
 createRoot(container).render(
   <StrictMode>
-    <App />
+    <App backend={window.equalizer} />
   </StrictMode>
 )

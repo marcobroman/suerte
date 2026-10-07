@@ -8,7 +8,7 @@ The project follows a local-first workflow: the main process owns the library in
 
 - Multi-folder music library scanning with progress, cancellation, and change detection
 - Artist and album browsing, global search across artists/albums/tracks, and album sorting (artist, title, year)
-- Queue-based playback: play, pause, seek, next/previous, play-next/add-to-queue/remove, collapsible Up-next panel
+- Queue-based playback: play, pause, seek, next/previous, repeat (off/all/one) and shuffle modes, play-next/add-to-queue/remove, chronological Queue panel that auto-scrolls to the playing track
 - 10-band graphic EQ with a draggable response curve, presets, preamp/bass/treble controls, and auto-preamp anti-clipping
 - MP3 tag editing (title, artist, album, track number, year, cover art) with backup/write/verify/rollback safety
 - Discogs auto-tag: search releases, preview the track mapping, and apply fields plus cover art in one step (needs a free personal token)
@@ -16,6 +16,7 @@ The project follows a local-first workflow: the main process owns the library in
 - Eight color themes with persisted selection
 - Missing/unavailable folder warnings (removable drives are never auto-pruned)
 - Keyboard: spacebar toggles play/pause outside of inputs and menus
+- Optional LAN server: stream the library to a phone browser on the same network, with token auth, byte-range seeking, and live library updates (desktop streams; a dedicated phone client is the next milestone)
 
 ## Tech Stack
 
@@ -31,15 +32,16 @@ The project follows a local-first workflow: the main process owns the library in
 ```text
 .
 ├── src/
-│   ├── main/                 # Electron main process (library, tags, Discogs, IPC, config)
+│   ├── main/                 # Electron main process (library, tags, Discogs, server, IPC, config)
 │   │   ├── config.ts
 │   │   ├── discogs.ts
 │   │   ├── index.ts
 │   │   ├── ipc.ts
+│   │   ├── server.ts         # Optional LAN server (library/stream/cover/events API)
 │   │   └── library/          # scan, group, cache, covers, roots, tags
 │   ├── preload/              # Secure bridge exposed to the renderer
-│   ├── renderer/src/         # React UI, playback engine, Web Audio graph
-│   │   ├── audio/            # engine, EQ DSP, settings, response math
+│   ├── renderer/src/         # React UI, playback engines, Web Audio graph
+│   │   ├── audio/            # buffer + stream engines, EQ DSP, settings, response math
 │   │   └── library/          # views, queue, search/sort, auto-tag, themes
 │   └── shared/               # IPC contract and shared type definitions
 ├── test/                     # Vitest suite (mirrors src layout)
@@ -100,6 +102,14 @@ npm run build
 
 This runs type checks and then builds the Electron app for production.
 
+### Windows installer
+
+```bash
+npm run dist
+```
+
+This builds `release/Onda Setup <version>.exe` via electron-builder — the file an end user installs; no npm needed on their machine. macOS builds (DMG, Apple Silicon + Intel) are produced by the release CI workflow, since Apple requires Mac hardware.
+
 ## Typical Usage
 
 1. Launch the app.
@@ -109,6 +119,7 @@ This runs type checks and then builds the Electron app for production.
 5. Open the equalizer from the sliders button in the player bar; drag nodes on the curve or pick a preset.
 6. Paste a Discogs personal token in Settings to enable auto-tag with cover art.
 7. Switch themes from Settings; everything persists across launches.
+8. To play on a phone on the same Wi-Fi: enable “Serve library on the local network” in Settings and open the shown URL in the phone browser with the access token.
 
 ## Configuration and Persistence
 
@@ -118,9 +129,10 @@ Small preferences and library roots live in `library.json` inside the Electron u
 - app theme
 - Discogs token presence (the token itself never leaves the main process)
 - equalizer curve (master volume stays session-only)
+- LAN server settings (enabled, port, access token)
 
 ## Notes
 
 - Tag writing supports MP3 files only; other formats open as read-only in tag flows.
 - Auto-tag needs network access and a Discogs token; cover art embeds JPEG/PNG only.
-- The suite is a local audio library workflow: substantial test coverage exists around scanning, cache behavior, metadata handling, queue/engine logic, and EQ math. It is built for desktop listening and collection management, not streaming.
+- The suite is a local audio library workflow: substantial test coverage exists around scanning, cache behavior, metadata handling, queue/engine logic, and EQ math. LAN streaming serves the library to other devices; a dedicated phone client is the next milestone, not yet built.

@@ -22,6 +22,7 @@ export interface SidebarProps {
   readonly currentIndex: number
   readonly playing: boolean
   readonly query: string
+  readonly navOpen: boolean
   onSelect(selection: Selection): void
   onRemoveRoot(path: string): void
   onPlayAt(queueIndex: number): void
@@ -46,7 +47,8 @@ export function Sidebar({
   onRemoveRoot,
   onPlayAt,
   onRemoveAt,
-  query
+  query,
+  navOpen
 }: SidebarProps) {
   const [queueOpen, setQueueOpen] = useState(false)
   // Reveal the queue the first time something lands in it, so queueing from a
@@ -72,7 +74,7 @@ export function Sidebar({
   }, [queueOpen])
 
   return (
-    <aside className="sidebar">
+    <aside className={navOpen ? 'sidebar open' : 'sidebar'}>
       {/* <div className="brand">
         <span className="brand-mark" aria-hidden="true" />
         <span className="brand-name">Onda</span>

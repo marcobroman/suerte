@@ -134,7 +134,26 @@ export interface AppSettings {
   readonly discogsTokenSet: boolean
   /** Saved equalizer curve, without the (session-only) master volume. */
   readonly eq: PersistedEqSettings | null
+  readonly server: ServerStatus
 }
+
+/** LAN server state for the renderer. The access token is exposed separately, on demand only. */
+export interface ServerStatus {
+  readonly enabled: boolean
+  readonly port: number
+  readonly tokenSet: boolean
+  /** Reachable base URL while the server runs, else null. */
+  readonly url: string | null
+}
+
+/** Persisted LAN server config. The token is generated on first enable. */
+export interface ServerConfig {
+  readonly enabled: boolean
+  readonly port: number
+  readonly token: string | undefined
+}
+
+export const DEFAULT_SERVER_PORT = 4280
 
 export interface ScanProgress {
   readonly scanned: number

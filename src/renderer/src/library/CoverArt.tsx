@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useCover } from './covers'
-import { coverStore } from './coverStore'
+import { useCoverStore } from './coverStore'
 
 export interface CoverArtProps {
   readonly path: string | null
@@ -51,7 +51,7 @@ export function CoverArt({
     return () => observer.disconnect()
   }, [eager])
 
-  const url = useCover(coverStore, visible ? path : null)
+  const url = useCover(useCoverStore(), visible ? path : null)
   const shape = rounded ? '50%' : '4px'
   const box = fill ? undefined : { width: size, height: size }
   const classes = ['cover']

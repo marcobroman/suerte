@@ -11,7 +11,7 @@ import {
   normalizeRoots,
   saveConfig
 } from '@main/config'
-import { DEFAULT_THEME } from '@shared/types'
+import { DEFAULT_SERVER_PORT, DEFAULT_THEME } from '@shared/types'
 
 describe('normalizeRoots', () => {
   it('keeps order and trims whitespace', () => {
@@ -157,6 +157,36 @@ describe('config', () => {
     await saveConfig(dir, { roots: ['/music'] })
 
     expect(await readFile(configPath(dir), 'utf8')).not.toContain('discogsToken')
+  })
+
+  it('round-trips a server section', async () => {
+    await saveConfig(dir, {
+      roots: ['/music'],
+      server: { enabled: true, port: 5000, token: 's3cret' }
+    })
+
+    expect((await loadConfig(dir)).server).toEqual({
+      enabled: true,
+      port: 5000,
+      token: 's3cret'
+    })
+  })
+
+  it('keeps the token but falls back to the default port when malformed', async () => {
+    await writeFile(
+      configPath(dir),
+      JSON.stringify({ version: 1, roots: [], server: { enabled: true, port: 80, token: 's3cret' } }),
+      'utf8'
+    )
+
+    expect((await loadConfig(dir)).server).toEqual({
+      enabled: true,
+      port: DEFAULT_SERVER_PORT,
+      token: 's3cret'
+    })
+
+    await writeFile(configPath(dir), JSON.stringify({ version: 1, roots: [] }), 'utf8')
+    expect((await loadConfig(dir)).server).toBeUndefined()
   })
 
   it('round-trips a saved eq curve', async () => {

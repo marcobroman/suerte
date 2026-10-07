@@ -16,6 +16,21 @@ export interface Voice {
   stop(): void
 }
 
+/**
+ * Structural subset of `HTMLAudioElement` the stream engine relies on. The
+ * element streams from the server, so unlike buffers nothing is decoded here.
+ */
+export interface MediaElementLike {
+  src: string
+  currentTime: number
+  readonly duration: number
+  readonly readyState: number
+  play(): Promise<void>
+  pause(): void
+  addEventListener(type: 'ended' | 'error' | 'loadedmetadata', listener: () => void): void
+  removeEventListener(type: 'ended' | 'error' | 'loadedmetadata', listener: () => void): void
+}
+
 /** Structural subset of `AnalyserNode` for the visualiser. */
 export interface AnalyserLike {
   readonly fftSize: number
@@ -36,6 +51,12 @@ export interface PlaybackGraph {
   /** Detaches `bytes`; callers must pass a copy they own. */
   decode(bytes: ArrayBuffer): Promise<AudioBufferLike>
   createVoice(buffer: AudioBufferLike, onEnded: () => void): Voice
+  /**
+   * Routes a media element through the same EQ chain voices use. One element
+   * gets exactly one source node, so the engine attaches once and returns a
+   * disconnect for disposal.
+   */
+  attachMediaElement(element: MediaElementLike): () => void
   applySettings(resolved: ResolvedGraphSettings): void
   setMasterVolume(linear: number): void
   setEq(settings: EqSettings, bandFrequenciesHz: readonly number[]): void

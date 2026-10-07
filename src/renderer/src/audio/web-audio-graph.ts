@@ -1,5 +1,5 @@
 import { BAND_Q, BANDS, BASS_SHELF_HZ, SHELF_Q, TREBLE_SHELF_HZ } from './bands'
-import type { AnalyserLike, AudioBufferLike, PlaybackGraph, Voice } from './graph'
+import type { AnalyserLike, AudioBufferLike, MediaElementLike, PlaybackGraph, Voice } from './graph'
 import { clampMasterVolume, resolveGraphSettings } from './settings'
 
 const FFT_SIZE = 2048
@@ -95,8 +95,7 @@ export function createWebAudioGraph(): PlaybackGraph {
       return ctx.decodeAudioData(bytes)
     },
 
-    createVoice(buffer: AudioBufferLike, onEnded: () => void): Voice {
-      const ctx = ensureContext()
+    createVoice(buffer: AudioBufferLike, onEnded: () => void): Voice {      const ctx = ensureContext()
       const source = new AudioBufferSourceNode(ctx, { buffer: buffer as AudioBuffer })
       source.connect(preamp as GainNode)
 
@@ -122,6 +121,20 @@ export function createWebAudioGraph(): PlaybackGraph {
           // that already ended cannot be stopped again, hence the finished check.
           if (finished) return
           source.stop()
+        }
+      }
+    },
+
+    attachMediaElement(element: MediaElementLike): () => void {
+      const ctx = ensureContext()
+      // One element owns exactly one source node; the engine attaches once.
+      const source = ctx.createMediaElementSource(element as HTMLAudioElement)
+      source.connect(preamp as GainNode)
+      return () => {
+        try {
+          source.disconnect()
+        } catch {
+          // Already torn down with the context.
         }
       }
     },

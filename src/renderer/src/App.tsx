@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { LibrarySummary } from '@shared/ipc'
-import type { Album, EqSettings, PersistedEqSettings, ThemeId, Track } from '@shared/types'
+import type { Album, EqSettings, PersistedEqSettings, ServerStatus, ThemeId, Track } from '@shared/types'
+import { DEFAULT_SERVER_PORT } from '@shared/types'
 import { extensionOf } from '@shared/audio-files'
 import { formatDuration } from './format'
 import { AlbumGrid } from './library/AlbumGrid'
@@ -29,8 +30,12 @@ import {
   type Selection
 } from './library/view'
 import { usePlaybackEngine } from './usePlaybackEngine'
+import type { Backend } from './backend'
+import { ViewportDebug } from './ViewportDebug'
+import { CoverStoreContext } from './library/coverStore'
+import { CoverStore } from './library/covers'
 
-export function App() {
+export function App({ backend }: { backend: Backend }) {
   const [summary, setSummary] = useState<LibrarySummary | null>(null)
   const [theme, setThemeState] = useState<ThemeId>(() =>
     resolveTheme(document.documentElement.dataset.theme)
@@ -43,6 +48,16 @@ export function App() {
   const [tokenDraft, setTokenDraft] = useState('')
   const [tokenBusy, setTokenBusy] = useState(false)
   const [tokenMessage, setTokenMessage] = useState('')
+  const [serverState, setServerState] = useState<ServerStatus>({
+    enabled: false,
+    port: DEFAULT_SERVER_PORT,
+    tokenSet: false,
+    url: null
+  })
+  const [serverToken, setServerToken] = useState<string | null>(null)
+  const [portDraft, setPortDraft] = useState('')
+  const [serverBusy, setServerBusy] = useState(false)
+  const [serverMessage, setServerMessage] = useState('')
   const [sortKey, setSortKey] = useState<AlbumSortKey>('artist')
   const [sortDir, setSortDir] = useState<AlbumSortDir>('asc')
   const [autoTag, setAutoTag] = useState<{
@@ -51,6 +66,7 @@ export function App() {
     initialQuery: string
   } | null>(null)
   const [eqOpen, setEqOpen] = useState(false)
+  const [navOpen, setNavOpen] = useState(false)
   const [activePresetId, setActivePresetId] = useState<string | null>(null)
   const [settingsLoaded, setSettingsLoaded] = useState(false)
   // Selection history, so drilling into an artist and then an album can be undone.
@@ -78,22 +94,23 @@ export function App() {
     return (summary?.tracks ?? []).filter((track) => matchTrack(track, needle))
   }, [summary, query])
 
-  const playback = usePlaybackEngine()
+  const playback = usePlaybackEngine((path) => backend.readFile(path))
   const playbackRef = useRef(playback)
   playbackRef.current = playback
+  const covers = useMemo(() => new CoverStore((path) => backend.readCover(path)), [backend])
 
   useEffect(() => {
-    const unsubscribeProgress = window.equalizer.onScanProgress((progress) => {
+    const unsubscribeProgress = backend.onScanProgress((progress) => {
       setScanStatus(
         progress.total > 0 ? `scanning ${progress.scanned}/${progress.total}` : 'scanning'
       )
     })
     // Main can rescan on its own, for instance when the window regains focus.
-    const unsubscribeLibrary = window.equalizer.onLibraryChanged((next) => {
+    const unsubscribeLibrary = backend.onLibraryChanged((next) => {
       setSummary(next)
       setScanStatus('library updated')
     })
-    void window.equalizer
+    void backend
       .getLibrary()
       .then((next) => {
         setSummary(next)
@@ -104,16 +121,17 @@ export function App() {
       unsubscribeProgress()
       unsubscribeLibrary()
     }
-  }, [])
+  }, [backend])
 
   useEffect(() => {
-    void window.equalizer
+    void backend
       .getSettings()
       .then((settings) => {
         const resolved = resolveTheme(settings.theme)
         applyTheme(resolved, document.documentElement)
         setThemeState(resolved)
         setDiscogsTokenSet(settings.discogsTokenSet)
+        setServerState(settings.server)
         if (settings.eq) {
           playbackRef.current.setEq({
             ...normalizeEqSettings(settings.eq),
@@ -123,12 +141,12 @@ export function App() {
         setSettingsLoaded(true)
       })
       .catch(() => undefined)
-  }, [])
+  }, [backend])
 
   const saveToken = useCallback(() => {
     setTokenBusy(true)
     setTokenMessage('')
-    void window.equalizer
+    void backend
       .setDiscogsToken(tokenDraft)
       .then(
         (settings) => {
@@ -139,12 +157,12 @@ export function App() {
         () => setTokenMessage('Could not save the token.')
       )
       .finally(() => setTokenBusy(false))
-  }, [tokenDraft])
+  }, [tokenDraft, backend])
 
   const clearToken = useCallback(() => {
     setTokenBusy(true)
     setTokenMessage('')
-    void window.equalizer
+    void backend
       .setDiscogsToken('')
       .then(
         (settings) => {
@@ -154,22 +172,92 @@ export function App() {
         () => setTokenMessage('Could not clear the token.')
       )
       .finally(() => setTokenBusy(false))
-  }, [])
+  }, [backend])
+
+  const refreshServerState = useCallback(
+    (settings: { server: ServerStatus }) => {
+      setServerState(settings.server)
+      if (!settings.server.tokenSet) setServerToken(null)
+    },
+    []
+  )
+
+  const toggleServer = useCallback(() => {
+    const next = !serverState.enabled
+    setServerBusy(true)
+    setServerMessage('')
+    setServerToken(null)
+    void backend
+      .setServerEnabled(next)
+      .then(
+        (settings) => {
+          refreshServerState(settings)
+          if (next && settings.server.url === null) {
+            setServerMessage('Could not listen — the port may be taken.')
+          }
+        },
+        () => setServerMessage('Could not change the server.')
+      )
+      .finally(() => setServerBusy(false))
+  }, [backend, serverState.enabled, refreshServerState])
+
+  const savePort = useCallback(() => {
+    setServerBusy(true)
+    setServerMessage('')
+    void backend
+      .setServerPort(Number(portDraft))
+      .then(
+        (settings) => {
+          refreshServerState(settings)
+          setPortDraft('')
+        },
+        () => setServerMessage('Could not change the port.')
+      )
+      .finally(() => setServerBusy(false))
+  }, [backend, portDraft, refreshServerState])
+
+  const showServerToken = useCallback(() => {
+    setServerBusy(true)
+    void backend
+      .getServerToken()
+      .then(
+        (token) => setServerToken(token),
+        () => setServerMessage('Could not read the token.')
+      )
+      .finally(() => setServerBusy(false))
+  }, [backend])
+
+  const regenerateServerToken = useCallback(() => {
+    setServerBusy(true)
+    setServerToken(null)
+    void backend
+      .regenerateServerToken()
+      .then(
+        (settings) => {
+          refreshServerState(settings)
+          setServerMessage('New token generated — reconnect your phone.')
+        },
+        () => setServerMessage('Could not regenerate the token.')
+      )
+      .finally(() => setServerBusy(false))
+  }, [backend, refreshServerState])
 
   const changeTheme = useCallback((next: ThemeId) => {
     // Applied immediately; main confirms and persists it.
     applyTheme(next, document.documentElement)
     setThemeState(next)
-    void window.equalizer.setTheme(next).then(
+    void backend.setTheme(next).then(
       (settings) => setThemeState(resolveTheme(settings.theme)),
       () => setScanStatus('could not save theme')
     )
-  }, [])
+  }, [backend])
 
   const select = useCallback(
     (next: Selection) => {
       setHistory((entries) => [...entries.slice(0, cursor + 1), next])
       setCursor((value) => value + 1)
+      // Closes the navigation drawer on narrow screens; harmless on desktop.
+      setNavOpen(false)
     },
     [cursor]
   )
@@ -181,13 +269,13 @@ export function App() {
     setScanStatus('choosing folders')
     void (async () => {
       try {
-        const picked = await window.equalizer.pickFolders()
+        const picked = await backend.pickFolders()
         if (picked.length === 0) {
           setScanStatus('cancelled')
           return
         }
         setScanStatus('scanning')
-        const result = await window.equalizer.scanLibrary()
+        const result = await backend.scanLibrary()
         setScanStatus(
           `+${result.added} new, ${result.changed} changed, ${result.removed} removed, ` +
             `${result.failed} failed in ${result.durationMs}ms`
@@ -198,22 +286,22 @@ export function App() {
         setBusy(false)
       }
     })()
-  }, [])
+  }, [backend])
 
   const removeRoot = useCallback((path: string) => {
     setScanStatus('forgetting folder')
-    void window.equalizer
+    void backend
       .removeRoot(path)
       .then((next) => {
         setSummary(next)
         setScanStatus('folder removed')
       })
       .catch((error: unknown) => setScanStatus(`error: ${String(error)}`))
-  }, [])
+  }, [backend])
 
   const reveal = useCallback((path: string) => {
-    void window.equalizer.revealInExplorer(path)
-  }, [])
+    void backend.revealInExplorer(path)
+  }, [backend])
 
   const playArtist = useCallback(() => {
     if (view.tracks.length === 0) return
@@ -407,7 +495,7 @@ export function App() {
     const key = JSON.stringify(persisted)
     if (key === lastSavedEq.current) return
     const timer = setTimeout(() => {
-      void window.equalizer.setEqSettings(persisted).then(
+      void backend.setEqSettings(persisted).then(
         () => {
           lastSavedEq.current = key
         },
@@ -415,7 +503,7 @@ export function App() {
       )
     }, 500)
     return () => clearTimeout(timer)
-  }, [settingsLoaded, playback.status.eq])
+  }, [settingsLoaded, playback.status.eq, backend])
 
   const openSearchAlbum = useCallback(
     (album: Album) => {
@@ -503,12 +591,22 @@ export function App() {
           : `${view.albums.length} of ${index.tree.albums.length} in your library`
 
   return (
+    <CoverStoreContext.Provider value={covers}>
     <div className="app">
       <div className="app-body">
+        {navOpen && (
+          <button
+            type="button"
+            className="scrim"
+            onClick={() => setNavOpen(false)}
+            aria-label="Close navigation"
+          />
+        )}
         <Sidebar
           index={index}
           artists={view.artists}
           selection={selection}
+          navOpen={navOpen}
           albumCount={index.tree.albums.length}
           trackCount={summary?.trackCount ?? 0}
           missingRoots={summary?.missingRoots ?? []}
@@ -524,6 +622,17 @@ export function App() {
 
         <main className="main">
           <header className="topbar">
+            <button
+              type="button"
+              className="round-button menu-button"
+              onClick={() => setNavOpen((open) => !open)}
+              aria-label="Open navigation"
+              aria-expanded={navOpen}
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z" fill="currentColor" />
+              </svg>
+            </button>
             <div className="history-buttons">
               <button
                 type="button"
@@ -627,6 +736,64 @@ export function App() {
                       </button>
                     )}
                     {tokenMessage !== '' && <p className="settings-note">{tokenMessage}</p>}
+                    <p className="settings-label">Phone streaming</p>
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={serverState.enabled}
+                        disabled={serverBusy}
+                        onChange={toggleServer}
+                      />{' '}
+                      Serve library on the local network
+                    </label>
+                    {serverState.enabled && (
+                      <>
+                        <p className="settings-note">
+                          {serverState.url ?? 'Not reachable — the port may be taken.'}
+                        </p>
+                        <div className="token-row">
+                          <input
+                            className="token-input"
+                            inputMode="numeric"
+                            placeholder={`Port (now ${serverState.port})`}
+                            value={portDraft}
+                            onChange={(event) => setPortDraft(event.target.value)}
+                            aria-label="Server port"
+                          />
+                          <button
+                            type="button"
+                            className="token-save"
+                            disabled={serverBusy || portDraft.trim() === ''}
+                            onClick={savePort}
+                          >
+                            Set
+                          </button>
+                        </div>
+                        {serverToken !== null ? (
+                          <p className="settings-note token-value">{serverToken}</p>
+                        ) : (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="settings-item"
+                            disabled={serverBusy}
+                            onClick={showServerToken}
+                          >
+                            Show access token
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="settings-item"
+                          disabled={serverBusy}
+                          onClick={regenerateServerToken}
+                        >
+                          New access token
+                        </button>
+                      </>
+                    )}
+                    {serverMessage !== '' && <p className="settings-note">{serverMessage}</p>}
                     <p className="settings-label">Theme</p>
                     {THEME_OPTIONS.map((option) => (
                       <button
@@ -844,6 +1011,7 @@ export function App() {
           onToggleShuffle={() => playback.toggleShuffle()}
         />
       </div>
+      <ViewportDebug />
       {autoTag && (
         <AutoTagDialog
           files={autoTagFilesOf(autoTag.tracks)}
@@ -853,5 +1021,6 @@ export function App() {
         />
       )}
     </div>
+    </CoverStoreContext.Provider>
   )
 }

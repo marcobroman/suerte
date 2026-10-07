@@ -1069,6 +1069,25 @@ p {
   font-size: 12px;
 }
 
+.settings-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.settings-check input {
+  accent-color: var(--accent);
+}
+
+.token-value {
+  font-family: ui-monospace, monospace;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
 .token-row {
   display: flex;
   gap: 6px;
@@ -1367,6 +1386,11 @@ p {
   border-radius: var(--radius);
   background: var(--panel);
   padding: 14px 20px 12px;
+  /* The panel lives in the bottom auto-sized zone with the transport bar, so
+     it scrolls internally past this height instead of pushing the transport
+     below the viewport fold. */
+  max-height: min(48dvh, 440px);
+  overflow-y: auto;
 }
 
 .eq-head {
@@ -1769,4 +1793,205 @@ var(--accent) var(--fill, 0%),
   height: 55%;
   border-radius: 2px;
   background: var(--cover-fallback);
+}
+
+/* ------------------------------------------------------- narrow screens */
+
+.menu-button {
+  display: none;
+}
+
+/* Temporary debug readout for layout reports; remove once fixed. */
+.viewport-debug {
+  position: fixed;
+  left: 8px;
+  bottom: 8px;
+  z-index: 100;
+  padding: 2px 8px;
+  border-radius: 500px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font: 11px/1.8 ui-monospace, monospace;
+  pointer-events: none;
+}
+
+.scrim {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .app {
+    height: 100vh;
+    height: 100dvh;
+    padding: 6px 6px 0;
+  }
+
+  .app-body {
+    grid-template-columns: 1fr;
+  }
+
+  .main {
+    min-width: 0;
+  }
+
+  .menu-button {
+    display: grid;
+  }
+
+  .topbar {
+    grid-template-columns: auto auto 1fr auto;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .search {
+    min-width: 0;
+  }
+
+  .status {
+    display: none;
+  }
+
+  .content {
+    padding: 4px 12px 16px;
+  }
+
+  .content-header h1 {
+    font-size: 24px;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 60;
+    width: min(300px, 84vw);
+    border-radius: 0;
+    transform: translateX(-105%);
+    transition: transform 160ms ease;
+  }
+
+  .sidebar.open {
+    transform: none;
+    box-shadow: 0 0 48px var(--shadow);
+  }
+
+  .scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    padding: 0;
+    border: 0;
+    background: var(--overlay);
+    cursor: default;
+  }
+
+  .album-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 14px 10px;
+  }
+
+  .album-hero {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+  }
+
+  .player {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .player-volume {
+    justify-self: stretch;
+    width: auto;
+  }
+
+  .album-actions {
+    flex-wrap: wrap;
+  }
+
+  .album-hero .cover {
+    width: 132px !important;
+    height: 132px !important;
+  }
+}
+
+@media (max-width: 480px) {
+  /* Compact transport so the dock stays proportional on phones. */
+  .player {
+    gap: 4px;
+    padding: 6px 10px;
+  }
+
+  .player-now {
+    gap: 8px;
+  }
+
+  .player-now .cover {
+    width: 36px !important;
+    height: 36px !important;
+  }
+
+  .now-title {
+    font-size: 12px;
+  }
+
+  .transport {
+    gap: 8px;
+  }
+
+  .progress {
+    gap: 6px;
+  }
+
+  .time {
+    font-size: 10px;
+  }
+
+  .content-header h1 {
+    font-size: 22px;
+  }
+
+  /* Condensed album page: smaller hero, tighter rows and buttons. */
+  .album-hero {
+    gap: 12px;
+    padding: 8px 0 12px;
+  }
+
+  .album-hero-text h1 {
+    font-size: 28px;
+    margin: 4px 0 8px;
+  }
+
+  .album-facts {
+    font-size: 12px;
+    margin-bottom: 10px;
+  }
+
+  .album-actions .primary-button {
+    padding: 8px 18px;
+    font-size: 13px;
+  }
+
+  .album-actions .ghost-button {
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+
+  .track {
+    gap: 8px;
+    padding: 5px 6px;
+  }
+
+  .track-title {
+    font-size: 13px;
+  }
+
+  .track-duration {
+    font-size: 12px;
+  }
 }

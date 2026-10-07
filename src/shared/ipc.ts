@@ -17,7 +17,11 @@ export const IPC = {
   updateTags: 'tags:update',
   searchDiscogs: 'discogs:search',
   getDiscogsRelease: 'discogs:release',
-  fetchDiscogsArt: 'discogs:art'
+  fetchDiscogsArt: 'discogs:art',
+  setServerEnabled: 'server:set-enabled',
+  setServerPort: 'server:set-port',
+  regenerateServerToken: 'server:regenerate-token',
+  getServerToken: 'server:get-token'
 } as const
 
 export const SCAN_PROGRESS_CHANNEL = 'scan:progress'
@@ -70,6 +74,10 @@ export interface IpcApi {
   searchDiscogs(query: unknown): Promise<DiscogsSearchOutcome>
   getDiscogsRelease(id: unknown, kind: unknown): Promise<DiscogsReleaseOutcome>
   fetchDiscogsArt(url: unknown): Promise<DiscogsArtOutcome>
+  setServerEnabled(on: unknown): Promise<AppSettings>
+  setServerPort(port: unknown): Promise<AppSettings>
+  regenerateServerToken(): Promise<AppSettings>
+  getServerToken(): Promise<string | null>
   onScanProgress(callback: (progress: ScanProgress) => void): () => void
   onLibraryChanged(callback: (summary: LibrarySummary) => void): () => void
 }

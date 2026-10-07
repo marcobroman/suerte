@@ -1,7 +1,10 @@
 import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { app, BrowserWindow, shell } from 'electron'
-import { loadConfig } from './config'
+import { loadConfig, saveConfig } from './config'
 import { createIpcContext, registerIpc, rescan } from './ipc'
+import { createLibraryServer } from './server'
+import { readCoverDataUrl } from './library/covers'
 
 // Resolved eagerly because app.getPath is unavailable until the app is ready.
 const userDataDir = app.getPath('userData')
@@ -54,6 +57,47 @@ app.whenReady().then(async () => {
   ipcContext.theme = config.theme
   ipcContext.discogsToken = config.discogsToken
   ipcContext.eq = config.eq
+  if (config.server) ipcContext.serverConfig = { ...config.server }
+
+  ipcContext.server = createLibraryServer({
+    getPort: () => ipcContext.serverConfig.port,
+    getToken: () => ipcContext.serverConfig.token,
+    getSummary: () => ({
+      tree: ipcContext.tree,
+      tracks: ipcContext.tracks,
+      trackCount: ipcContext.tracks.length,
+      roots: ipcContext.roots,
+      missingRoots: ipcContext.missingRoots,
+      scanning: ipcContext.scanning
+    }),
+    readCover: (path) => readCoverDataUrl(path, ipcContext.covers),
+    getRoots: () => ipcContext.roots
+  })
+  if (ipcContext.serverConfig.enabled) {
+    if (ipcContext.serverConfig.token === undefined) {
+      ipcContext.serverConfig = {
+        ...ipcContext.serverConfig,
+        token: randomBytes(32).toString('hex')
+      }
+      await saveConfig(userDataDir, {
+        roots: ipcContext.roots,
+        theme: ipcContext.theme,
+        discogsToken: ipcContext.discogsToken,
+        eq: ipcContext.eq,
+        server: {
+          enabled: ipcContext.serverConfig.enabled,
+          port: ipcContext.serverConfig.port,
+          token: ipcContext.serverConfig.token
+        }
+      })
+    }
+    try {
+      await ipcContext.server.start()
+    } catch {
+      // A taken port at launch leaves the server stopped; enabling it again
+      // later retries. Nothing else about startup depends on it.
+    }
+  }
 
   createWindow()
 

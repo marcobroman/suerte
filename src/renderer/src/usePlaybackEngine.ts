@@ -48,16 +48,23 @@ export interface PlaybackControls {
  * The queue is explicit: viewing/navigating never touches it. Only play actions
  * (playQueue/playAt) change what is queued, so drilling into an album cannot
  * interrupt playback.
+ *
+ * Audio bytes come from the injected reader (Electron bridge by default), so a
+ * streaming backend can supply them instead without touching this hook.
  */
-export function usePlaybackEngine(): PlaybackControls {
+export function usePlaybackEngine(
+  readFile: (path: string) => Promise<ArrayBuffer> = (path) => window.equalizer.readFile(path)
+): PlaybackControls {
   const engineRef = useRef<PlaybackEngine | null>(null)
+  const readFileRef = useRef(readFile)
+  readFileRef.current = readFile
   const [status, setStatus] = useState<EngineStatus>(IDLE_STATUS)
   const [positionSec, setPositionSec] = useState(0)
 
   useEffect(() => {
     const engine = new PlaybackEngine({
       createGraph: createWebAudioGraph,
-      readFile: (path) => window.equalizer.readFile(path)
+      readFile: (path) => readFileRef.current(path)
     })
     engineRef.current = engine
     const unsubscribe = engine.subscribe(setStatus)

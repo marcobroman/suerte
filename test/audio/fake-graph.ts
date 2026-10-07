@@ -1,5 +1,5 @@
 import type { EqSettings } from '@shared/types'
-import type { AnalyserLike, AudioBufferLike } from '@/audio/graph'
+import type { AnalyserLike, AudioBufferLike, MediaElementLike } from '@/audio/graph'
 import type { ResolvedGraphSettings } from '@/audio/settings'
 
 export class FakeBuffer {
@@ -68,6 +68,15 @@ export class FakeGraph {
     const voice = new FakeVoice(onEnded)
     this.voices.push(voice)
     return voice
+  }
+
+  mediaAttachments = 0
+
+  attachMediaElement(_element: MediaElementLike): () => void {
+    this.mediaAttachments += 1
+    return () => {
+      this.mediaAttachments -= 1
+    }
   }
 
   async decode(bytes: ArrayBuffer): Promise<FakeBuffer> {
