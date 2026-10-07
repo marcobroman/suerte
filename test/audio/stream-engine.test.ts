@@ -94,8 +94,7 @@ describe('StreamEngine', () => {
     expect(engine.status().track?.path).toBe('a.mp3')
   })
 
-  it('pauses and resumes without reloading the source', async () => {
-    const { engine, element } = makeStreamEngine([track('a.mp3', 10)])
+  it('pauses and resumes without reloading the source', async () => {    const { engine, element } = makeStreamEngine([track('a.mp3', 10)])
     await engine.play()
     element.currentTime = 5
 
@@ -106,6 +105,18 @@ describe('StreamEngine', () => {
     await engine.play()
     expect(element.playCalls).toBe(2)
     expect(element.src).toBe('https://phone/stream?path=a.mp3')
+    expect(engine.state).toBe('playing')
+  })
+
+  it('restarts the playing track from zero when played again', async () => {
+    const { engine, element } = makeStreamEngine([track('a.mp3', 10)])
+    await engine.play()
+    element.currentTime = 6
+
+    await engine.playAt(0)
+
+    expect(element.currentTime).toBe(0)
+    expect(engine.position()).toBe(0)
     expect(engine.state).toBe('playing')
   })
 

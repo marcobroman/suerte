@@ -438,6 +438,15 @@ export class StreamEngine {
     }
     if (this.#index !== index) return
 
+    // A replayed track must restart even when its source is already loaded:
+    // unlike a fresh buffer voice, the element keeps its old clock unless told.
+    try {
+      this.#element.currentTime = offsetSec
+      this.#offsetSec = offsetSec
+      this.#pendingOffset = null
+    } catch {
+      this.#pendingOffset = offsetSec > 0 ? offsetSec : null
+    }
     try {
       await this.#element.play()
     } catch (error: unknown) {

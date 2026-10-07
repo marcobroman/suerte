@@ -8,7 +8,7 @@ The project follows a local-first workflow: the main process owns the library in
 
 - Multi-folder music library scanning with progress, cancellation, and change detection
 - Artist and album browsing, global search across artists/albums/tracks, and album sorting (artist, title, year)
-- Queue-based playback: play, pause, seek, next/previous, repeat (off/all/one) and shuffle modes, play-next/add-to-queue/remove, chronological Queue panel that auto-scrolls to the playing track — in the sidebar and as a pull-up sheet from the transport bar
+- Queue-based playback: play, pause, seek, next/previous, repeat (off/all/one) and shuffle modes, play-next/add-to-queue/remove, chronological Queue bottom sheet (toggled from the now-playing area) that auto-scrolls to the playing track
 - 10-band graphic EQ with a draggable response curve, presets, preamp/bass/treble controls, and auto-preamp anti-clipping
 - MP3 tag editing (title, artist, album, track number, year, cover art) with backup/write/verify/rollback safety
 - Discogs auto-tag: search releases, preview the track mapping, and apply fields plus cover art in one step (needs a free personal token)
@@ -16,7 +16,8 @@ The project follows a local-first workflow: the main process owns the library in
 - Eight color themes with persisted selection
 - Missing/unavailable folder warnings (removable drives are never auto-pruned)
 - Keyboard: spacebar toggles play/pause outside of inputs and menus
-- Optional LAN server: stream the library to a phone browser on the same network, with token auth, byte-range seeking, and live library updates (desktop streams; a dedicated phone client is the next milestone). Served payloads carry opaque track ids only — absolute paths and roots never leave the machine.
+- Optional LAN server: stream the library to a phone browser on the same network, with token auth, byte-range seeking, and live library updates. Served payloads carry opaque track ids only — absolute paths and roots never leave the machine.
+- Phone client: the same bundle boots in a mobile browser against the LAN server (boot screen with QR-friendly token entry), streaming playback through the shared EQ chain, with desktop-only actions hidden and no volume slider (hardware buttons own it)
 
 ## Tech Stack
 
@@ -42,9 +43,13 @@ The project follows a local-first workflow: the main process owns the library in
 │   ├── preload/              # Secure bridge exposed to the renderer
 │   ├── renderer/src/         # React UI, playback engines, Web Audio graph
 │   │   ├── audio/            # buffer + stream engines, EQ DSP, settings, response math
-│   │   └── library/          # views, queue, search/sort, auto-tag, themes
-│   └── shared/               # IPC contract and shared type definitions
+│   │   ├── library/          # views, queue, search/sort, auto-tag, themes, phone boot
+│   │   ├── backend.ts        # Backend seam (Electron bridge vs HTTP)
+│   │   ├── http-backend.ts   # Phone backend over fetch/SSE
+│   │   ├── usePlaybackEngine.ts / useStreamEngine.ts
+│   │   └── shared/           # IPC contract and shared type definitions
 ├── test/                     # Vitest suite (mirrors src layout)
+├── .github/workflows/        # Release CI (Windows installer, macOS DMGs)
 ├── electron-builder.yml      # Packaging configuration
 ├── electron.vite.config.ts   # Electron Vite config
 ├── eslint.config.mjs         # ESLint configuration
@@ -119,7 +124,7 @@ This builds `release/Onda Setup <version>.exe` via electron-builder — the file
 5. Open the equalizer from the sliders button in the player bar; drag nodes on the curve or pick a preset.
 6. Paste a Discogs personal token in Settings to enable auto-tag with cover art.
 7. Switch themes from Settings; everything persists across launches.
-8. To play on a phone on the same Wi-Fi: enable “Serve library on the local network” in Settings and open the shown URL in the phone browser with the access token.
+8. To play on a phone on the same Wi-Fi: enable “Serve library on the local network” in Settings, then open the shown URL (or scan the QR code) in the phone browser and enter the access token. The phone client streams through the shared EQ chain; desktop-only actions stay hidden.
 
 ## Configuration and Persistence
 
@@ -136,4 +141,4 @@ Small preferences and library roots live in `library.json` inside the Electron u
 - Tag writing supports MP3 files only; other formats open as read-only in tag flows.
 - Auto-tag needs network access and a Discogs token; cover art embeds JPEG/PNG only.
 - The LAN server uses a single shared token over plain HTTP, suited to a trusted home network. Cookie sessions, per-device tokens, and TLS are planned alongside the phone client.
-- The suite is a local audio library workflow: substantial test coverage exists around scanning, cache behavior, metadata handling, queue/engine logic, and EQ math. LAN streaming serves the library to other devices; a dedicated phone client is the next milestone, not yet built.
+- The suite is a local audio library workflow: substantial test coverage exists around scanning, cache behavior, metadata handling, queue/engine logic, streaming server, and EQ math. The phone client reuses the desktop UI over the LAN API; PWA offline support and hardened auth (cookie sessions, per-device tokens, TLS) are future work.

@@ -1610,6 +1610,11 @@ p {
   color: var(--accent-bright);
 }
 
+.queue-inline {
+  margin-left: auto;
+  flex: none;
+}
+
 .player {
   position: relative;
   display: grid;
@@ -1880,6 +1885,12 @@ var(--accent) var(--fill, 0%),
 
   .search {
     min-width: 0;
+    /* 16px or larger stops mobile browsers from auto-zooming into the field. */
+    font-size: 16px;
+  }
+
+  .token-input {
+    font-size: 16px;
   }
 
   .status {

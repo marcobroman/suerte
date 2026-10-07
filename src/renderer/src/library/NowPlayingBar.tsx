@@ -72,6 +72,21 @@ export function NowPlayingBar({
           <span className="now-title">{track?.title ?? 'Nothing playing'}</span>
           <span className="now-artist">{track?.artist || 'Unknown artist'}</span>
         </div>
+        <button
+          type="button"
+          className={queueOpen ? 'icon-toggle queue-inline active' : 'icon-toggle queue-inline'}
+          onClick={onToggleQueue}
+          aria-label={queueOpen ? 'Hide queue' : 'Show queue'}
+          aria-expanded={queueOpen}
+          title="Queue"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path
+              d="M4 6h12v2H4zm0 5h12v2H4zm0 5h8v2H4zm13-1 4-4v8z"
+              fill="currentColor"
+            />
+          </svg>
+        </button>
       </div>
 
       <div className="player-center">
@@ -150,23 +165,6 @@ export function NowPlayingBar({
                 1
               </span>
             )}
-          </button>
-          <button
-            type="button"
-            className={
-              queueOpen ? 'icon-toggle transport-small active' : 'icon-toggle transport-small'
-            }
-            onClick={onToggleQueue}
-            aria-label={queueOpen ? 'Hide queue' : 'Show queue'}
-            aria-expanded={queueOpen}
-            title="Queue"
-          >
-            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-              <path
-                d="M4 6h12v2H4zm0 5h12v2H4zm0 5h8v2H4zm13-1 4-4v8z"
-                fill="currentColor"
-              />
-            </svg>
           </button>
           <button
             type="button"
