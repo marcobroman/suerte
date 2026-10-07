@@ -41,6 +41,19 @@ export interface LibrarySummary {
 }
 
 /**
+ * Library payload safe for the network: every absolute path is replaced by its
+ * opaque track id (Album.trackPaths and Track.path carry ids, nothing else
+ * changes shape), and roots are dropped entirely — the remote client never
+ * needs local filesystem locations.
+ */
+export interface PublicLibrarySummary {
+  readonly tree: LibraryTree
+  readonly tracks: readonly Track[]
+  readonly trackCount: number
+  readonly scanning: boolean
+}
+
+/**
  * The entire privileged surface available to the renderer. The renderer runs
  * sandboxed with context isolation, so this contract plus the preload bridge is
  * the only way to touch the filesystem.

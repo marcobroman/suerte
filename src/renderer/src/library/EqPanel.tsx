@@ -23,8 +23,6 @@ export function EqPanel({ eq, activePresetId, onChange, onPreset, onReset }: EqP
     onChange({ bandGainsDb })
   }
 
-  const activePreset = EQ_PRESETS.find((preset) => preset.id === activePresetId)
-
   const sideControl = (
     label: string,
     value: number,
@@ -45,10 +43,7 @@ export function EqPanel({ eq, activePresetId, onChange, onPreset, onReset }: EqP
   return (
     <section className="eq-panel" aria-label="Equalizer">
       <header className="eq-head">
-        <h2>
-          Equalizer
-          {activePreset && <span className="eq-preset-name"> · {activePreset.label}</span>}
-        </h2>
+        <h2>Equalizer</h2>
         <div className="eq-head-actions">
           <select
             className="sort-select"

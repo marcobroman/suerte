@@ -819,38 +819,6 @@ p {
 
 /* --------------------------------------------------------------- sidebar queue */
 
-.queue-side {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  padding-top: 4px;
-  border-top: 1px solid var(--divider);
-  margin-top: 8px;
-}
-
-.queue-side-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  padding: 0 10px 0 0;
-  border: 0;
-  background: transparent;
-}
-
-.queue-side-label {
-  padding-left: 10px;
-}
-
-.queue-chevron {
-  color: var(--faint);
-  font-size: 12px;
-}
-
-.queue-side-head:hover .queue-chevron {
-  color: var(--text);
-}
-
 .queue-side-list {
   margin: 0;
   padding: 0;
@@ -1086,6 +1054,55 @@ p {
   font-family: ui-monospace, monospace;
   overflow-wrap: anywhere;
   user-select: all;
+}
+
+.qr-code {
+  width: 180px;
+  height: 180px;
+  margin: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+
+/* ------------------------------------------------------------ phone boot */
+
+.boot {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 16px;
+  background: var(--bg);
+}
+
+.boot-card {
+  display: flex;
+  flex-direction: column;
+  width: min(360px, 100%);
+  padding: 24px 20px;
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.boot-card h1 {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.6px;
+}
+
+.boot-label {
+  margin: 12px 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.boot-input {
+  width: 100%;
+}
+
+.boot-connect {
+  margin-top: 16px;
 }
 
 .token-row {
@@ -1382,6 +1399,28 @@ p {
   gap: 8px;
 }
 
+.queue-sheet {
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 12px 12px 8px;
+}
+
+.queue-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px 8px;
+}
+
+.queue-sheet-head h2 {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.queue-sheet .queue-side-list {
+  max-height: min(38dvh, 320px);
+}
+
 .eq-panel {
   border-radius: var(--radius);
   background: var(--panel);
@@ -1409,11 +1448,6 @@ p {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.eq-preset-name {
-  color: var(--accent-bright);
-  font-weight: 600;
 }
 
 .eq-curve {

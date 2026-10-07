@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import type { Artist, Track } from '@shared/types'
-import { formatCount, formatDuration } from '../format'
+import type { Artist } from '@shared/types'
+import { formatCount } from '../format'
 import { albumsForArtist, coverPathForAlbum, type LibraryIndex, type Selection } from './view'
 import { CoverArt } from './CoverArt'
 
@@ -18,15 +17,12 @@ export interface SidebarProps {
   readonly albumCount: number
   readonly trackCount: number
   readonly missingRoots: readonly string[]
-  readonly queue: readonly Track[]
-  readonly currentIndex: number
-  readonly playing: boolean
   readonly query: string
   readonly navOpen: boolean
+  /** Phone client: folder management stays hidden. */
+  readonly phone: boolean
   onSelect(selection: Selection): void
   onRemoveRoot(path: string): void
-  onPlayAt(queueIndex: number): void
-  onRemoveAt(queueIndex: number): void
 }
 
 /**
@@ -40,38 +36,14 @@ export function Sidebar({
   albumCount,
   trackCount,
   missingRoots,
-  queue,
-  currentIndex,
-  playing,
   onSelect,
   onRemoveRoot,
-  onPlayAt,
-  onRemoveAt,
   query,
-  navOpen
+  navOpen,
+  phone
 }: SidebarProps) {
-  const [queueOpen, setQueueOpen] = useState(false)
-  // Reveal the queue the first time something lands in it, so queueing from a
-  // collapsed panel still gives visible feedback.
-  const prevQueueLength = useRef(queue.length)
-  useEffect(() => {
-    if (prevQueueLength.current === 0 && queue.length > 0) setQueueOpen(true)
-    prevQueueLength.current = queue.length
-  }, [queue.length])
   const activeArtist = selection.kind === 'artist' ? selection.artist : null
   const activeAlbumKey = selection.kind === 'album' ? selection.albumKey : null
-  const listRef = useRef<HTMLOListElement | null>(null)
-  // Chronological queue with the view scrolled to what's playing on expand,
-  // so played tracks sit on top and the current track is still visible.
-  useEffect(() => {
-    if (!queueOpen) return
-    const list = listRef.current
-    const active = list?.querySelector('.queue-side-row.active') as HTMLElement | null
-    if (!list || !active) return
-    const listRect = list.getBoundingClientRect()
-    const rowRect = active.getBoundingClientRect()
-    list.scrollTop += rowRect.top - listRect.top - list.clientHeight / 2 + rowRect.height / 2
-  }, [queueOpen])
 
   return (
     <aside className={navOpen ? 'sidebar open' : 'sidebar'}>
@@ -119,71 +91,8 @@ export function Sidebar({
         })}
       </nav>
 
-      <section className="queue-side" aria-label="Playback queue">
-        <button
-          type="button"
-          className="queue-side-head"
-          onClick={() => setQueueOpen((open) => !open)}
-          aria-expanded={queueOpen}
-          aria-label={queueOpen ? 'Collapse queue' : 'Expand queue'}
-        >
-          <span className="nav-label queue-side-label">
-            Queue{queue.length > 0 ? ` · ${queue.length}` : ''}
-          </span>
-          <span className="queue-chevron" aria-hidden="true">
-            {queueOpen ? '▾' : '▸'}
-          </span>
-        </button>
-        {queueOpen &&
-          (queue.length === 0 ? (
-            <p className="nav-empty">Nothing queued yet</p>
-          ) : (
-            <ol ref={listRef} className="queue-side-list">
-              {queue.map((track, listIndex) => {
-                const active = listIndex === currentIndex
-                const wasPlayed = listIndex < currentIndex
-                return (
-                  <li
-                    key={`${track.path}#${listIndex}`}
-                    className={
-                      active
-                        ? 'queue-side-row active'
-                        : wasPlayed
-                          ? 'queue-side-row played'
-                          : 'queue-side-row'
-                    }
-                  >
-                    <button
-                      type="button"
-                      className="queue-side-play"
-                      onClick={() => onPlayAt(listIndex)}
-                      aria-label={wasPlayed ? `Replay ${track.title}` : `Play ${track.title}`}
-                      title={`${track.title} — ${track.artist || 'Unknown artist'}`}
-                    >
-                      <span className="queue-side-title">{track.title}</span>
-                      <span className="queue-side-meta">
-                        {active && playing ? '❙❙ ' : ''}
-                        {track.artist || 'Unknown artist'} · {formatDuration(track.durationSec)}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost queue-side-remove"
-                      onClick={() => onRemoveAt(listIndex)}
-                      aria-label={`Remove ${track.title} from queue`}
-                      title="Remove from queue"
-                    >
-                      ×
-                    </button>
-                  </li>
-                )
-              })}
-            </ol>
-          ))}
-      </section>
-
       <div className="sidebar-foot">
-        {missingRoots.length > 0 && (
+        {!phone && missingRoots.length > 0 && (
           <div className="missing-roots" role="status">
             <p className="missing-title">
               {missingRoots.length === 1

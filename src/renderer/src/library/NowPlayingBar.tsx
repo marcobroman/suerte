@@ -20,6 +20,9 @@ export interface NowPlayingBarProps {
   readonly eqOpen: boolean
   readonly repeat: RepeatMode
   readonly shuffle: boolean
+  /** Phone client: hardware buttons own the volume, so the slider hides. */
+  readonly phone: boolean
+  readonly queueOpen: boolean
   onToggle(): void
   onNext(): void
   onPrevious(): void
@@ -28,6 +31,7 @@ export interface NowPlayingBarProps {
   onToggleEq(): void
   onCycleRepeat(): void
   onToggleShuffle(): void
+  onToggleQueue(): void
 }
 
 /**
@@ -44,6 +48,8 @@ export function NowPlayingBar({
   eqOpen,
   repeat,
   shuffle,
+  phone,
+  queueOpen,
   onToggle,
   onNext,
   onPrevious,
@@ -51,7 +57,8 @@ export function NowPlayingBar({
   onVolume,
   onToggleEq,
   onCycleRepeat,
-  onToggleShuffle
+  onToggleShuffle,
+  onToggleQueue
 }: NowPlayingBarProps) {
   const playing = state === 'playing'
   const loading = state === 'loading'
@@ -144,6 +151,40 @@ export function NowPlayingBar({
               </span>
             )}
           </button>
+          <button
+            type="button"
+            className={
+              queueOpen ? 'icon-toggle transport-small active' : 'icon-toggle transport-small'
+            }
+            onClick={onToggleQueue}
+            aria-label={queueOpen ? 'Hide queue' : 'Show queue'}
+            aria-expanded={queueOpen}
+            title="Queue"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path
+                d="M4 6h12v2H4zm0 5h12v2H4zm0 5h8v2H4zm13-1 4-4v8z"
+                fill="currentColor"
+              />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={
+              eqOpen ? 'icon-toggle transport-small active' : 'icon-toggle transport-small'
+            }
+            onClick={onToggleEq}
+            aria-label={eqOpen ? 'Hide equalizer' : 'Show equalizer'}
+            aria-expanded={eqOpen}
+            title="Equalizer"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path
+                d="M4 6h10v2H4zm0 5h16v2H4zm0 5h10v2H4zM17 8l5 3-5 3z"
+                fill="currentColor"
+              />
+            </svg>
+          </button>
         </div>
 
         <div className="progress">
@@ -159,30 +200,17 @@ export function NowPlayingBar({
         </div>
       </div>
 
-      <div className="player-volume">
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-          <path
-            d="M4 9v6h4l5 4V5L8 9H4zm12.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z"
-            fill="currentColor"
-          />
-        </svg>
-        <Slider value={volume} max={1} step={0.01} label="Volume" onChange={onVolume} />
-        <button
-          type="button"
-          className={eqOpen ? 'icon-toggle active' : 'icon-toggle'}
-          onClick={onToggleEq}
-          aria-label={eqOpen ? 'Hide equalizer' : 'Show equalizer'}
-          aria-expanded={eqOpen}
-          title="Equalizer"
-        >
+      {!phone && (
+        <div className="player-volume">
           <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
             <path
-              d="M4 6h10v2H4zm0 5h16v2H4zm0 5h10v2H4zM17 8l5 3-5 3z"
+              d="M4 9v6h4l5 4V5L8 9H4zm12.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z"
               fill="currentColor"
             />
           </svg>
-        </button>
-      </div>
+          <Slider value={volume} max={1} step={0.01} label="Volume" onChange={onVolume} />
+        </div>
+      )}
 
       {state === 'error' && <p className="player-error">Playback failed</p>}
     </footer>

@@ -1,0 +1,218 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  HttpBackend,
+  loadServerCredentials,
+  phoneEntryUrl,
+  saveServerCredentials,
+  tokenFromHash,
+  type KeyValueStorage
+} from '@/http-backend'
+
+class FakeEventSource {
+  static instances: FakeEventSource[] = []
+  readonly url: string
+  onmessage: ((event: { data: string }) => void) | null = null
+  closed = false
+
+  constructor(url: string) {
+    this.url = url
+    FakeEventSource.instances.push(this)
+  }
+
+  close(): void {
+    this.closed = true
+  }
+
+  emit(data: string): void {
+    this.onmessage?.({ data })
+  }
+}
+
+function stubStorage(): { store: Map<string, string>; storage: KeyValueStorage } {
+  const store = new Map<string, string>()
+  return {
+    store,
+    storage: {
+      getItem: (key: string): string | null => store.get(key) ?? null,
+      setItem: (key: string, value: string): void => {
+        store.set(key, String(value))
+      }
+    }
+  }
+}
+
+let storage: KeyValueStorage
+
+function makeBackend(): HttpBackend {
+  return new HttpBackend('https://phone:4280/', 'tok', storage)
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' }
+  })
+}
+
+describe('HttpBackend', () => {
+  beforeEach(() => {
+    storage = stubStorage().storage
+    FakeEventSource.instances = []
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('fetches the library with a bearer token', async () => {
+    const fetchImpl = vi.fn(
+      async (_url: string, _init?: { headers?: Record<string, string> }): Promise<Response> =>
+        jsonResponse({ trackCount: 3 })
+    )
+    vi.stubGlobal('fetch', fetchImpl)
+    const backend = new HttpBackend('https://phone:4280/', 'tok', storage)
+
+    const library = await backend.getLibrary()
+
+    expect(library).toMatchObject({ trackCount: 3 })
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    const call = fetchImpl.mock.calls[0]
+    expect(call?.[0]).toBe('https://phone:4280/api/library?token=tok')
+    expect(call?.[1]).toMatchObject({ headers: { Authorization: 'Bearer tok' } })
+  })
+
+  it('throws on failed requests', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'x' }, 403)))
+    const backend = makeBackend()
+
+    await expect(backend.getLibrary()).rejects.toThrow('403')
+  })
+
+  it('builds same-origin cover URLs without fetching', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({}))
+    vi.stubGlobal('fetch', fetchImpl)
+    const backend = makeBackend()
+
+    const url = await backend.readCover('C:\\music\\a b.mp3')
+
+    // Opaque id in, same-origin URL out — the value is passed through untouched.
+    expect(url).toBe('https://phone:4280/api/cover?id=C%3A%5Cmusic%5Ca+b.mp3&token=tok')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('reads file bytes for compatibility', async () => {
+    const bytes = new Uint8Array([1, 2, 3])
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(bytes, { status: 200 }))
+    )
+    const backend = makeBackend()
+
+    expect(new Uint8Array(await backend.readFile('a.mp3'))).toEqual(bytes)
+  })
+
+  it('subscribes to library changes over SSE and unsubscribes', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({})))
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const backend = makeBackend()
+    const seen: unknown[] = []
+
+    const unsubscribe = backend.onLibraryChanged((summary) => {
+      seen.push(summary)
+    })
+    expect(FakeEventSource.instances).toHaveLength(1)
+    expect(FakeEventSource.instances[0]?.url).toBe(
+      'https://phone:4280/api/events?token=tok'
+    )
+
+    FakeEventSource.instances[0]?.emit('{"trackCount":5,"scanning":false}')
+    FakeEventSource.instances[0]?.emit('not json{{{')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatchObject({ trackCount: 5, roots: [], missingRoots: [] })
+
+    unsubscribe()
+    expect(FakeEventSource.instances[0]?.closed).toBe(true)
+  })
+
+  it('keeps theme and EQ per device in local storage', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({})))
+    const backend = makeBackend()
+
+    expect((await backend.getSettings()).theme).toBe('spotlight')
+    await backend.setTheme('midnight')
+    expect((await backend.getSettings()).theme).toBe('midnight')
+    await backend.setTheme('neon')
+    expect((await backend.getSettings()).theme).toBe('midnight')
+
+    await backend.setEqSettings({
+      bandGainsDb: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      preampDb: 0,
+      autoPreamp: true,
+      bassDb: 0,
+      trebleDb: 0
+    })
+    expect((await backend.getSettings()).eq).toMatchObject({ preampDb: 0 })
+    expect((await backend.getSettings()).server).toMatchObject({
+      enabled: true,
+      tokenSet: true,
+      url: 'https://phone:4280'
+    })
+  })
+
+  it('rejects desktop-only operations', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({})))
+    const backend = makeBackend()
+
+    await expect(backend.pickFolders()).rejects.toThrow(/desktop/i)
+    await expect(backend.scanLibrary()).rejects.toThrow(/desktop/i)
+    await expect(backend.updateTags([])).rejects.toThrow(/desktop/i)
+    await expect(backend.searchDiscogs()).rejects.toThrow(/desktop/i)
+    await expect(backend.setServerEnabled()).rejects.toThrow(/desktop/i)
+    await expect(backend.getServerToken()).rejects.toThrow(/desktop/i)
+  })
+})
+
+describe('phoneEntryUrl', () => {
+  it('carries the token in the fragment, never the query', () => {
+    const url = phoneEntryUrl('https://phone:4280/', 't o/k&en')
+
+    expect(url.startsWith('https://phone:4280/')).toBe(true)
+    expect(url).not.toContain('?token=')
+    expect(url).toContain('#t=')
+  })
+})
+
+describe('tokenFromHash', () => {
+  it('reads the token back out', () => {
+    expect(tokenFromHash('#t=abc123')).toBe('abc123')
+    expect(tokenFromHash('#t=a%20b')).toBe('a b')
+  })
+
+  it('rejects empties and garbage', () => {
+    expect(tokenFromHash('')).toBeNull()
+    expect(tokenFromHash('#t=')).toBeNull()
+    expect(tokenFromHash('#other=1')).toBeNull()
+    expect(tokenFromHash('#t=%ZZ')).toBeNull()
+  })
+})
+
+describe('server credentials', () => {
+  it('round-trips through storage', () => {
+    const { storage } = stubStorage()
+
+    expect(loadServerCredentials(storage)).toBeNull()
+    saveServerCredentials(storage, { baseUrl: 'https://phone:4280', token: 'tok' })
+    expect(loadServerCredentials(storage)).toEqual({ baseUrl: 'https://phone:4280', token: 'tok' })
+  })
+
+  it('drops blanks and malformed entries', () => {
+    const { store, storage } = stubStorage()
+
+    store.set('onda.phone.server', JSON.stringify({ baseUrl: '', token: 'tok' }))
+    expect(loadServerCredentials(storage)).toBeNull()
+    store.set('onda.phone.server', 'not json{{{')
+    expect(loadServerCredentials(storage)).toBeNull()
+    store.set('onda.phone.server', JSON.stringify({ baseUrl: 7 }))
+    expect(loadServerCredentials(storage)).toBeNull()
+  })
+})

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import QRCode from 'qrcode'
 import type { LibrarySummary } from '@shared/ipc'
 import type { Album, EqSettings, PersistedEqSettings, ServerStatus, ThemeId, Track } from '@shared/types'
 import { DEFAULT_SERVER_PORT } from '@shared/types'
@@ -10,6 +11,7 @@ import { AutoTagDialog } from './library/AutoTagDialog'
 import { EqPanel } from './library/EqPanel'
 import { NowPlayingBar } from './library/NowPlayingBar'
 import { OverflowMenu } from './library/OverflowMenu'
+import { QueueList } from './library/QueueList'
 import { Sidebar } from './library/Sidebar'
 import { SortControl } from './library/SortControl'
 import { applyTheme, resolveTheme, THEME_OPTIONS } from './library/themes'
@@ -29,13 +31,19 @@ import {
   type AlbumSortKey,
   type Selection
 } from './library/view'
-import { usePlaybackEngine } from './usePlaybackEngine'
+import type { PlaybackControls } from './usePlaybackEngine'
+import { phoneEntryUrl } from './http-backend'
 import type { Backend } from './backend'
 import { ViewportDebug } from './ViewportDebug'
-import { CoverStoreContext } from './library/coverStore'
-import { CoverStore } from './library/covers'
 
-export function App({ backend }: { backend: Backend }) {
+export interface AppProps {
+  readonly backend: Backend
+  readonly playback: PlaybackControls
+  /** Phone client: desktop-only surfaces (folders, tagging, server admin) stay hidden. */
+  readonly phone: boolean
+}
+
+export function App({ backend, playback, phone }: AppProps) {
   const [summary, setSummary] = useState<LibrarySummary | null>(null)
   const [theme, setThemeState] = useState<ThemeId>(() =>
     resolveTheme(document.documentElement.dataset.theme)
@@ -55,6 +63,7 @@ export function App({ backend }: { backend: Backend }) {
     url: null
   })
   const [serverToken, setServerToken] = useState<string | null>(null)
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
   const [portDraft, setPortDraft] = useState('')
   const [serverBusy, setServerBusy] = useState(false)
   const [serverMessage, setServerMessage] = useState('')
@@ -66,6 +75,7 @@ export function App({ backend }: { backend: Backend }) {
     initialQuery: string
   } | null>(null)
   const [eqOpen, setEqOpen] = useState(false)
+  const [queueSheetOpen, setQueueSheetOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false)
   const [activePresetId, setActivePresetId] = useState<string | null>(null)
   const [settingsLoaded, setSettingsLoaded] = useState(false)
@@ -94,10 +104,8 @@ export function App({ backend }: { backend: Backend }) {
     return (summary?.tracks ?? []).filter((track) => matchTrack(track, needle))
   }, [summary, query])
 
-  const playback = usePlaybackEngine((path) => backend.readFile(path))
   const playbackRef = useRef(playback)
   playbackRef.current = playback
-  const covers = useMemo(() => new CoverStore((path) => backend.readCover(path)), [backend])
 
   useEffect(() => {
     const unsubscribeProgress = backend.onScanProgress((progress) => {
@@ -114,7 +122,8 @@ export function App({ backend }: { backend: Backend }) {
       .getLibrary()
       .then((next) => {
         setSummary(next)
-        if (next.roots.length > 0) setScanStatus('ready')
+        // Roots on desktop, tracks on phone (whose roots are always empty).
+        if (next.roots.length > 0 || next.trackCount > 0) setScanStatus('ready')
       })
       .catch((error: unknown) => setScanStatus(`error: ${String(error)}`))
     return () => {
@@ -187,6 +196,7 @@ export function App({ backend }: { backend: Backend }) {
     setServerBusy(true)
     setServerMessage('')
     setServerToken(null)
+    setQrDataUrl(null)
     void backend
       .setServerEnabled(next)
       .then(
@@ -230,6 +240,7 @@ export function App({ backend }: { backend: Backend }) {
   const regenerateServerToken = useCallback(() => {
     setServerBusy(true)
     setServerToken(null)
+    setQrDataUrl(null)
     void backend
       .regenerateServerToken()
       .then(
@@ -241,6 +252,54 @@ export function App({ backend }: { backend: Backend }) {
       )
       .finally(() => setServerBusy(false))
   }, [backend, refreshServerState])
+
+  const resolvePhoneLink = useCallback(async (): Promise<string | null> => {
+    const base = serverState.url
+    if (!base) return null
+    const token = serverToken ?? (await backend.getServerToken())
+    if (!token) return null
+    setServerToken(token)
+    // Entry, not API: the boot screen reads the token from the fragment,
+    // which browsers never send to the server.
+    return phoneEntryUrl(base, token)
+  }, [backend, serverState.url, serverToken])
+
+  const copyPhoneLink = useCallback(async () => {
+    const link = await resolvePhoneLink()
+    if (!link) {
+      setServerMessage('Could not read the token.')
+      return
+    }
+    setServerBusy(true)
+    try {
+      await navigator.clipboard.writeText(link)
+      setServerMessage('Copied — paste it into the phone browser.')
+    } catch {
+      setServerMessage('Copy failed — select the link below manually.')
+    } finally {
+      setServerBusy(false)
+    }
+  }, [resolvePhoneLink])
+
+  const toggleQrCode = useCallback(async () => {
+    if (qrDataUrl !== null) {
+      setQrDataUrl(null)
+      return
+    }
+    setServerBusy(true)
+    try {
+      const link = await resolvePhoneLink()
+      if (!link) {
+        setServerMessage('Could not read the token.')
+        return
+      }
+      setQrDataUrl(await QRCode.toDataURL(link, { width: 200, margin: 1 }))
+    } catch {
+      setServerMessage('Could not generate the QR code.')
+    } finally {
+      setServerBusy(false)
+    }
+  }, [qrDataUrl, resolvePhoneLink])
 
   const changeTheme = useCallback((next: ThemeId) => {
     // Applied immediately; main confirms and persists it.
@@ -591,7 +650,6 @@ export function App({ backend }: { backend: Backend }) {
           : `${view.albums.length} of ${index.tree.albums.length} in your library`
 
   return (
-    <CoverStoreContext.Provider value={covers}>
     <div className="app">
       <div className="app-body">
         {navOpen && (
@@ -610,14 +668,10 @@ export function App({ backend }: { backend: Backend }) {
           albumCount={index.tree.albums.length}
           trackCount={summary?.trackCount ?? 0}
           missingRoots={summary?.missingRoots ?? []}
-          queue={playback.status.queue}
-          currentIndex={playback.status.index}
-          playing={playback.status.state === 'playing'}
           query={query}
+          phone={phone}
           onSelect={select}
           onRemoveRoot={removeRoot}
-          onPlayAt={(queueIndex) => void playback.playAt(queueIndex)}
-          onRemoveAt={(queueIndex) => playback.removeAt(queueIndex)}
         />
 
         <main className="main">
@@ -687,20 +741,26 @@ export function App({ backend }: { backend: Backend }) {
                 </button>
                 {settingsOpen && (
                   <div className="settings-menu" role="menu" aria-label="Settings">
-                    <p className="settings-label">Library</p>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="settings-item"
-                      disabled={busy}
-                      onClick={() => {
-                        setSettingsOpen(false)
-                        chooseFolders()
-                      }}
-                    >
-                      {busy ? 'Scanning…' : 'Add music folders'}
-                    </button>
-                    <p className="settings-label">Discogs</p>
+                    {!phone && (
+                      <>
+                        <p className="settings-label">Library</p>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="settings-item"
+                          disabled={busy}
+                          onClick={() => {
+                            setSettingsOpen(false)
+                            chooseFolders()
+                          }}
+                        >
+                          {busy ? 'Scanning…' : 'Add music folders'}
+                        </button>
+                      </>
+                    )}
+                    {!phone && (
+                      <>
+                        <p className="settings-label">Discogs</p>
                     <p className="settings-note">
                       {discogsTokenSet
                         ? 'Token saved — auto-tag is on.'
@@ -736,7 +796,11 @@ export function App({ backend }: { backend: Backend }) {
                       </button>
                     )}
                     {tokenMessage !== '' && <p className="settings-note">{tokenMessage}</p>}
-                    <p className="settings-label">Phone streaming</p>
+                      </>
+                    )}
+                    {!phone && (
+                      <>
+                        <p className="settings-label">Phone streaming</p>
                     <label className="settings-check">
                       <input
                         type="checkbox"
@@ -751,6 +815,40 @@ export function App({ backend }: { backend: Backend }) {
                         <p className="settings-note">
                           {serverState.url ?? 'Not reachable — the port may be taken.'}
                         </p>
+                        {serverState.url !== null && (
+                          <>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="settings-item"
+                              disabled={serverBusy}
+                              onClick={() => void copyPhoneLink()}
+                            >
+                              Copy phone link (with token)
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="settings-item"
+                              disabled={serverBusy}
+                              onClick={() => void toggleQrCode()}
+                            >
+                              {qrDataUrl !== null ? 'Hide QR code' : 'Show QR code'}
+                            </button>
+                          </>
+                        )}
+                        {qrDataUrl !== null && (
+                          <>
+                            <img
+                              className="qr-code"
+                              src={qrDataUrl}
+                              alt="QR code linking to the phone client"
+                            />
+                            <p className="settings-note">
+                              Anyone who scans this can access your library.
+                            </p>
+                          </>
+                        )}
                         <div className="token-row">
                           <input
                             className="token-input"
@@ -794,6 +892,8 @@ export function App({ backend }: { backend: Backend }) {
                       </>
                     )}
                     {serverMessage !== '' && <p className="settings-note">{serverMessage}</p>}
+                      </>
+                    )}
                     <p className="settings-label">Theme</p>
                     {THEME_OPTIONS.map((option) => (
                       <button
@@ -870,6 +970,7 @@ export function App({ backend }: { backend: Backend }) {
                     <AlbumGrid
                       albums={sortedSearchAlbums}
                       query=""
+                      phone={phone}
                       onOpen={openSearchAlbum}
                       onPlay={playAlbum}
                       onQueueNext={queueAlbumNext}
@@ -917,7 +1018,9 @@ export function App({ backend }: { backend: Backend }) {
                                   label: 'Add to queue',
                                   onSelect: () => queueSearchTrackLast(trackIndex)
                                 },
-                                { label: 'Show in Explorer', onSelect: () => reveal(track.path) }
+                                ...(!phone
+                                  ? [{ label: 'Show in Explorer', onSelect: () => reveal(track.path) }]
+                                  : [])
                               ]}
                             />
                           </li>
@@ -952,6 +1055,7 @@ export function App({ backend }: { backend: Backend }) {
                 <AlbumGrid
                   albums={sortedBrowseAlbums}
                   query={query}
+                  phone={phone}
                   onOpen={openAlbum}
                   onPlay={playAlbum}
                   onQueueNext={queueAlbumNext}
@@ -964,6 +1068,7 @@ export function App({ backend }: { backend: Backend }) {
                 album={album}
                 tracks={view.tracks}
                 query={query}
+                phone={phone}
                 currentPath={playback.status.track?.path ?? null}
                 playing={playback.status.state === 'playing'}
                 onPlay={playTrackAt}
@@ -991,6 +1096,28 @@ export function App({ backend }: { backend: Backend }) {
             onReset={resetEq}
           />
         )}
+        {queueSheetOpen && (
+          <section className="queue-sheet" aria-label="Playback queue">
+            <header className="queue-sheet-head">
+              <h2>Queue{playback.status.queue.length > 0 ? ` · ${playback.status.queue.length}` : ''}</h2>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => setQueueSheetOpen(false)}
+                aria-label="Close queue"
+              >
+                ✕
+              </button>
+            </header>
+            <QueueList
+              queue={playback.status.queue}
+              currentIndex={playback.status.index}
+              playing={playback.status.state === 'playing'}
+              onPlayAt={(queueIndex) => void playback.playAt(queueIndex)}
+              onRemoveAt={(queueIndex) => playback.removeAt(queueIndex)}
+            />
+          </section>
+        )}
         <NowPlayingBar
           track={playback.status.track}
           state={playback.status.state}
@@ -999,6 +1126,8 @@ export function App({ backend }: { backend: Backend }) {
           volume={playback.status.volume}
           canPlay={canPlay}
           eqOpen={eqOpen}
+          queueOpen={queueSheetOpen}
+          phone={phone}
           repeat={playback.status.repeat}
           shuffle={playback.status.shuffle}
           onToggle={togglePlayback}
@@ -1007,11 +1136,12 @@ export function App({ backend }: { backend: Backend }) {
           onSeek={playback.seek}
           onVolume={playback.setVolume}
           onToggleEq={() => setEqOpen((open) => !open)}
+          onToggleQueue={() => setQueueSheetOpen((open) => !open)}
           onCycleRepeat={() => playback.cycleRepeat()}
           onToggleShuffle={() => playback.toggleShuffle()}
         />
       </div>
-      <ViewportDebug />
+      {!phone && <ViewportDebug />}
       {autoTag && (
         <AutoTagDialog
           files={autoTagFilesOf(autoTag.tracks)}
@@ -1021,6 +1151,5 @@ export function App({ backend }: { backend: Backend }) {
         />
       )}
     </div>
-    </CoverStoreContext.Provider>
   )
 }

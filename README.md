@@ -8,7 +8,7 @@ The project follows a local-first workflow: the main process owns the library in
 
 - Multi-folder music library scanning with progress, cancellation, and change detection
 - Artist and album browsing, global search across artists/albums/tracks, and album sorting (artist, title, year)
-- Queue-based playback: play, pause, seek, next/previous, repeat (off/all/one) and shuffle modes, play-next/add-to-queue/remove, chronological Queue panel that auto-scrolls to the playing track
+- Queue-based playback: play, pause, seek, next/previous, repeat (off/all/one) and shuffle modes, play-next/add-to-queue/remove, chronological Queue panel that auto-scrolls to the playing track — in the sidebar and as a pull-up sheet from the transport bar
 - 10-band graphic EQ with a draggable response curve, presets, preamp/bass/treble controls, and auto-preamp anti-clipping
 - MP3 tag editing (title, artist, album, track number, year, cover art) with backup/write/verify/rollback safety
 - Discogs auto-tag: search releases, preview the track mapping, and apply fields plus cover art in one step (needs a free personal token)
@@ -16,7 +16,7 @@ The project follows a local-first workflow: the main process owns the library in
 - Eight color themes with persisted selection
 - Missing/unavailable folder warnings (removable drives are never auto-pruned)
 - Keyboard: spacebar toggles play/pause outside of inputs and menus
-- Optional LAN server: stream the library to a phone browser on the same network, with token auth, byte-range seeking, and live library updates (desktop streams; a dedicated phone client is the next milestone)
+- Optional LAN server: stream the library to a phone browser on the same network, with token auth, byte-range seeking, and live library updates (desktop streams; a dedicated phone client is the next milestone). Served payloads carry opaque track ids only — absolute paths and roots never leave the machine.
 
 ## Tech Stack
 
@@ -135,4 +135,5 @@ Small preferences and library roots live in `library.json` inside the Electron u
 
 - Tag writing supports MP3 files only; other formats open as read-only in tag flows.
 - Auto-tag needs network access and a Discogs token; cover art embeds JPEG/PNG only.
+- The LAN server uses a single shared token over plain HTTP, suited to a trusted home network. Cookie sessions, per-device tokens, and TLS are planned alongside the phone client.
 - The suite is a local audio library workflow: substantial test coverage exists around scanning, cache behavior, metadata handling, queue/engine logic, and EQ math. LAN streaming serves the library to other devices; a dedicated phone client is the next milestone, not yet built.

@@ -6,6 +6,8 @@ import { coverPathForAlbum } from './view'
 export interface AlbumGridProps {
   readonly albums: readonly Album[]
   readonly query: string
+  /** Phone client: desktop-only actions stay hidden. */
+  readonly phone: boolean
   onOpen(album: Album): void
   onPlay(album: Album): void
   onQueueNext(album: Album): void
@@ -14,7 +16,7 @@ export interface AlbumGridProps {
 }
 
 /** Card grid of album tiles, the shape a music library is normally browsed in. */
-export function AlbumGrid({ albums, query, onOpen, onPlay, onQueueNext, onQueueLast, onAutoTag }: AlbumGridProps) {
+export function AlbumGrid({ albums, query, phone, onOpen, onPlay, onQueueNext, onQueueLast, onAutoTag }: AlbumGridProps) {
   if (albums.length === 0) {
     return (
       <p className="empty">
@@ -62,7 +64,7 @@ export function AlbumGrid({ albums, query, onOpen, onPlay, onQueueNext, onQueueL
                 { label: 'Play', onSelect: () => onPlay(album) },
                 { label: 'Play next', onSelect: () => onQueueNext(album) },
                 { label: 'Add to queue', onSelect: () => onQueueLast(album) },
-                { label: 'Auto-tag…', onSelect: () => onAutoTag(album) }
+                ...(!phone ? [{ label: 'Auto-tag…', onSelect: () => onAutoTag(album) }] : [])
               ]}
             />
           </div>

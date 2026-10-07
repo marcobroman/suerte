@@ -1,8 +1,10 @@
 import { createReadStream, promises as fs } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { networkInterfaces } from 'node:os'
-import { isAbsolute, normalize, relative } from 'node:path'
-import type { LibrarySummary } from '@shared/ipc'
+import { isAbsolute, normalize, relative, resolve, sep } from 'node:path'
+import type { LibrarySummary, PublicLibrarySummary } from '@shared/ipc'
+import type { Track } from '@shared/types'
 import { extensionOf } from '@shared/audio-files'
 
 export interface LibraryServerDeps {
@@ -12,6 +14,8 @@ export interface LibraryServerDeps {
   getSummary(): LibrarySummary
   readCover(path: string): Promise<string | null>
   getRoots(): readonly string[]
+  /** Built renderer directory, or null when it was never built (dev mode). */
+  getClientDir(): string | null
 }
 
 export interface LibraryServer {
@@ -68,6 +72,41 @@ export function insideRoots(roots: readonly string[], candidate: string): boolea
   return false
 }
 
+/**
+ * Opaque track id: a one-way hash of the absolute path. Deterministic, so it
+ * survives rescans and restarts, and irreversible, so absolute paths (drives,
+ * usernames, folder layout) never leave the machine. Remote clients use ids
+ * everywhere local code uses paths.
+ */
+export function trackId(path: string): string {
+  return createHash('sha256').update(path, 'utf8').digest('hex')
+}
+
+const CLIENT_MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.json': 'application/json',
+  '.map': 'application/json',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.ttf': 'font/ttf'
+}
+
+/** Pinned inside the client dir: `..` collapses lexically, so escapes fail the prefix check. Exported for tests. */
+export function clientPathIn(clientDir: string, requestPath: string): string | null {
+  // resolve() absolutizes and normalizes both sides alike, so a relative base
+  // and mixed separators compare correctly on every platform.
+  const base = resolve(clientDir)
+  const resolved = resolve(base, `.${requestPath}`)
+  // The separator-joined prefix keeps a sibling like `<dir>-other` out.
+  if (resolved !== base && !resolved.startsWith(`${base}${sep}`)) return null
+  return resolved
+}
+
 function json(response: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)
   response.writeHead(status, {
@@ -82,6 +121,44 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
   let listening = false
   let boundPort = 0
   const events = new Set<ServerResponse>()
+  // Opaque id → real path, rebuilt only when the track list itself is replaced
+  // (i.e. on rescan); lookups in between are map hits.
+  let idCache: { tracks: readonly Track[]; byId: Map<string, string> } | null = null
+
+  function resolveTrackId(id: string): string | null {
+    if (!/^[0-9a-f]{64}$/.test(id)) return null
+    const tracks = deps.getSummary().tracks
+    if (!idCache || idCache.tracks !== tracks) {
+      const byId = new Map<string, string>()
+      for (const track of tracks) byId.set(trackId(track.path), track.path)
+      idCache = { tracks, byId }
+    }
+    return idCache.byId.get(id) ?? null
+  }
+
+  function publicSummary(): PublicLibrarySummary {
+    const summary = deps.getSummary()
+    const idByPath = new Map<string, string>()
+    const idOf = (path: string): string => {
+      const existing = idByPath.get(path)
+      if (existing) return existing
+      const id = trackId(path)
+      idByPath.set(path, id)
+      return id
+    }
+    return {
+      tree: {
+        artists: summary.tree.artists,
+        albums: summary.tree.albums.map((album) => ({
+          ...album,
+          trackPaths: album.trackPaths.map(idOf)
+        }))
+      },
+      tracks: summary.tracks.map((track) => ({ ...track, path: idOf(track.path) })),
+      trackCount: summary.trackCount,
+      scanning: summary.scanning
+    }
+  }
 
   function authorized(request: IncomingMessage, url: URL): boolean {
     const token = deps.getToken()
@@ -171,10 +248,70 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
     response.end(bytes)
   }
 
+  async function serveClient(pathname: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const clientDir = deps.getClientDir()
+    if (!clientDir) {
+      json(response, 404, { error: 'client not built' })
+      return
+    }
+    const sendFile = async (file: string, noStore: boolean): Promise<void> => {
+      const headers: Record<string, string> = {
+        'content-type': CLIENT_MIME[extensionOf(file)] ?? 'application/octet-stream'
+      }
+      if (noStore) headers['cache-control'] = 'no-store'
+      try {
+        const stats = await fs.stat(file)
+        if (!stats.isFile()) throw new Error('not a file')
+        headers['content-length'] = String(stats.size)
+        response.writeHead(200, headers)
+        createReadStream(file).pipe(response)
+      } catch {
+        json(response, 404, { error: 'not found' })
+      }
+    }
+    if (pathname === '/' || pathname === '/index.html') {
+      await sendFile(resolve(clientDir, 'index.html'), true)
+      return
+    }
+    const file = clientPathIn(clientDir, pathname)
+    if (!file) {
+      json(response, 404, { error: 'not found' })
+      return
+    }
+    try {
+      const stats = await fs.stat(file)
+      if (stats.isFile()) {
+        await sendFile(file, false)
+        return
+      }
+    } catch {
+      // Missing below: fall through to the SPA fallback when appropriate.
+    }
+    // Single-page app: navigations outside /api/* load the shell, which routes
+    // client-side. Asset-looking misses 404 so stale bundles fail loudly.
+    const acceptsHtml = (request.headers.accept ?? '').includes('text/html')
+    if (acceptsHtml) {
+      await sendFile(resolve(clientDir, 'index.html'), true)
+      return
+    }
+    json(response, 404, { error: 'not found' })
+  }
+
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost')
     if (request.method !== 'GET') {
       json(response, 405, { error: 'method not allowed' })
+      return
+    }
+    // The UI shell is public: a phone must load the page to enter its token.
+    // Everything under /api/* requires the token instead.
+    if (!url.pathname.startsWith('/api/')) {
+      try {
+        await serveClient(url.pathname, request, response)
+      } catch {
+        if (!response.headersSent) json(response, 500, { error: 'request failed' })
+        else response.end()
+      }
       return
     }
     if (!authorized(request, url)) {
@@ -183,7 +320,7 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
     }
 
     if (url.pathname === '/api/library') {
-      json(response, 200, deps.getSummary())
+      json(response, 200, publicSummary())
       return
     }
     if (url.pathname === '/api/events') {
@@ -200,18 +337,21 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
       return
     }
     if (url.pathname === '/api/stream' || url.pathname === '/api/cover') {
-      const requested = url.searchParams.get('path')
-      if (!requested) {
-        json(response, 400, { error: 'missing path' })
+      const id = url.searchParams.get('id')
+      if (!id) {
+        json(response, 400, { error: 'missing id' })
         return
       }
-      if (!insideRoots(deps.getRoots(), requested)) {
-        json(response, 403, { error: 'outside the library' })
+      // Opaque ids cannot traverse by construction; the resolved real path is
+      // still containment-checked as defense in depth.
+      const real = resolveTrackId(id)
+      if (!real || !insideRoots(deps.getRoots(), real)) {
+        json(response, 404, { error: 'not found' })
         return
       }
       try {
-        if (url.pathname === '/api/cover') await serveCover(requested, response)
-        else await serveStream(requested, request, response)
+        if (url.pathname === '/api/cover') await serveCover(real, response)
+        else await serveStream(real, request, response)
       } catch {
         if (!response.headersSent) json(response, 500, { error: 'stream failed' })
         else response.end()
@@ -264,7 +404,7 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
 
     pushLibraryChanged(): void {
       if (events.size === 0) return
-      const payload = `data: ${JSON.stringify(deps.getSummary())}\n\n`
+      const payload = `data: ${JSON.stringify(publicSummary())}\n\n`
       for (const client of [...events]) {
         try {
           client.write(payload)

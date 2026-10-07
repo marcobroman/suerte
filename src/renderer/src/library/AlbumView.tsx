@@ -10,6 +10,8 @@ export interface AlbumViewProps {
   readonly query: string
   readonly currentPath: string | null
   readonly playing: boolean
+  /** Phone client: desktop-only actions stay hidden. */
+  readonly phone: boolean
   onPlay(index: number): void
   onPlayAll(): void
   onAddNext(index: number): void
@@ -28,6 +30,7 @@ export function AlbumView({
   query,
   currentPath,
   playing,
+  phone,
   onPlay,
   onPlayAll,
   onAddNext,
@@ -72,9 +75,11 @@ export function AlbumView({
             <button type="button" className="ghost-button" onClick={onQueueAlbumLast}>
               + Queue
             </button>
-            <button type="button" className="ghost-button" onClick={onAutoTagAlbum}>
-              Auto-tag
-            </button>
+            {!phone && (
+              <button type="button" className="ghost-button" onClick={onAutoTagAlbum}>
+                Auto-tag
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -111,8 +116,12 @@ export function AlbumView({
                   { label: 'Play', onSelect: () => onPlay(index) },
                   { label: 'Play next', onSelect: () => onAddNext(index) },
                   { label: 'Add to queue', onSelect: () => onAddLast(index) },
-                  { label: 'Auto-tag…', onSelect: () => onAutoTagTrack(index) },
-                  { label: 'Show in Explorer', onSelect: () => onReveal(track.path) }
+                  ...(!phone
+                    ? [
+                        { label: 'Auto-tag…', onSelect: () => onAutoTagTrack(index) },
+                        { label: 'Show in Explorer', onSelect: () => onReveal(track.path) }
+                      ]
+                    : [])
                 ]}
               />
             </li>

@@ -1,71 +1,29 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { EqSettings, Track } from '@shared/types'
-import { PlaybackEngine, type EngineStatus, type RepeatMode } from './audio/engine'
-import type { StreamEngine } from './audio/stream-engine'
+import type { EngineStatus, RepeatMode } from './audio/engine'
 import { createWebAudioGraph } from './audio/web-audio-graph'
-import { defaultEqSettings } from './audio/settings'
-
-export const IDLE_STATUS: EngineStatus = {
-  state: 'idle',
-  track: null,
-  index: -1,
-  queue: [],
-  queueLength: 0,
-  eq: defaultEqSettings(),
-  repeat: 'off',
-  shuffle: false,
-  positionSec: 0,
-  durationSec: 0,
-  volume: 0.85,
-  error: null
-}
-
-export interface PlaybackControls {
-  readonly status: EngineStatus
-  readonly positionSec: number
-  readonly engine: PlaybackEngine | StreamEngine | null
-  toggle(): void
-  next(): void
-  previous(): void
-  seek(positionSec: number): void
-  playAt(index: number): void
-  playQueue(tracks: readonly Track[], startIndex?: number): void
-  addNext(tracks: readonly Track[]): void
-  addLast(tracks: readonly Track[]): void
-  removeAt(index: number): void
-  refreshTracks(tracks: readonly Track[]): void
-  setEq(settings: EqSettings): void
-  setRepeat(mode: RepeatMode): void
-  cycleRepeat(): void
-  setShuffle(on: boolean): void
-  toggleShuffle(): void
-  setVolume(volume: number): void
-}
+import { StreamEngine } from './audio/stream-engine'
+import type { HttpBackend } from './http-backend'
+import { IDLE_STATUS, type PlaybackControls } from './usePlaybackEngine'
 
 /**
- * Owns the engine for the lifetime of the component. The graph is created lazily
- * inside the engine, so no AudioContext exists until the first play.
- *
- * The queue is explicit: viewing/navigating never touches it. Only play actions
- * (playQueue/playAt) change what is queued, so drilling into an album cannot
- * interrupt playback.
- *
- * Audio bytes come from the injected reader (Electron bridge by default), so a
- * streaming backend can supply them instead without touching this hook.
+ * Phone counterpart to usePlaybackEngine: identical controls shape, but the
+ * transport streams from the LAN server through an audio element instead of
+ * decoding local files. The EQ chain is shared, so curve, presets, and phone-local
+ * persistence all behave the same.
  */
-export function usePlaybackEngine(
-  readFile: (path: string) => Promise<ArrayBuffer> = (path) => window.equalizer.readFile(path)
-): PlaybackControls {
-  const engineRef = useRef<PlaybackEngine | null>(null)
-  const readFileRef = useRef(readFile)
-  readFileRef.current = readFile
+export function useStreamEngine(backend: HttpBackend): PlaybackControls {
+  const engineRef = useRef<StreamEngine | null>(null)
+  const backendRef = useRef(backend)
+  backendRef.current = backend
   const [status, setStatus] = useState<EngineStatus>(IDLE_STATUS)
   const [positionSec, setPositionSec] = useState(0)
 
   useEffect(() => {
-    const engine = new PlaybackEngine({
+    const engine = new StreamEngine({
       createGraph: createWebAudioGraph,
-      readFile: (path) => readFileRef.current(path)
+      createAudio: () => new Audio(),
+      streamUrl: (path) => backendRef.current.streamUrl(path)
     })
     engineRef.current = engine
     const unsubscribe = engine.subscribe(setStatus)
@@ -77,9 +35,8 @@ export function usePlaybackEngine(
     }
   }, [])
 
-  // The engine only reports on transitions, so the clock is sampled per frame
-  // while playing. The snapshot branch re-runs on every engine emit — not just
-  // state flips — so seeks made while paused visibly move the slider at once.
+  // Same clock contract as the desktop hook: sample per frame while playing,
+  // re-sync on every engine emit otherwise.
   useEffect(() => {
     if (status.state !== 'playing') {
       setPositionSec(engineRef.current?.position() ?? 0)
@@ -94,7 +51,7 @@ export function usePlaybackEngine(
     return () => cancelAnimationFrame(frame)
   }, [status])
 
-  const call = useCallback((action: (engine: PlaybackEngine) => void) => {
+  const call = useCallback((action: (engine: StreamEngine) => void) => {
     const engine = engineRef.current
     if (engine) action(engine)
   }, [])

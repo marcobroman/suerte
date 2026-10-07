@@ -1,5 +1,6 @@
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { app, BrowserWindow, shell } from 'electron'
 import { loadConfig, saveConfig } from './config'
 import { createIpcContext, registerIpc, rescan } from './ipc'
@@ -71,7 +72,13 @@ app.whenReady().then(async () => {
       scanning: ipcContext.scanning
     }),
     readCover: (path) => readCoverDataUrl(path, ipcContext.covers),
-    getRoots: () => ipcContext.roots
+    getRoots: () => ipcContext.roots,
+    getClientDir: () => {
+      // The dev tree has an index.html too, but only a built client (with an
+      // assets bundle) is servable as-is.
+      const dir = join(__dirname, '..', 'renderer')
+      return existsSync(join(dir, 'assets')) ? dir : null
+    }
   })
   if (ipcContext.serverConfig.enabled) {
     if (ipcContext.serverConfig.token === undefined) {

@@ -27,6 +27,11 @@ export function CoverArt({
 }: CoverArtProps) {
   const ref = useRef<HTMLDivElement | null>(null)
   const [visible, setVisible] = useState(eager)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    setFailed(false)
+  }, [path])
 
   useEffect(() => {
     if (eager) {
@@ -56,17 +61,25 @@ export function CoverArt({
   const box = fill ? undefined : { width: size, height: size }
   const classes = ['cover']
   if (fill) classes.push('cover-fill')
-  if (url) classes.push('has-art')
+  // A resolvable URL can still 404 (remote covers); fall back instead of
+  // showing a broken image. Reset per path so stale failures never stick.
+  const art = url && !failed ? url : null
+  if (art) classes.push('has-art')
 
   return (
     <div
       ref={ref}
       className={classes.join(' ')}
       style={{ ...box, borderRadius: shape }}
-      aria-hidden={url ? undefined : true}
+      aria-hidden={art ? undefined : true}
     >
-      {url ? (
-        <img src={url} alt={alt} {...(fill ? {} : { width: size, height: size })} />
+      {art ? (
+        <img
+          src={art}
+          alt={alt}
+          onError={() => setFailed(true)}
+          {...(fill ? {} : { width: size, height: size })}
+        />
       ) : (
         <span className="cover-fallback" />
       )}
