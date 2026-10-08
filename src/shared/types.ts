@@ -144,7 +144,12 @@ export interface ServerStatus {
   readonly tokenSet: boolean
   /** Reachable base URL while the server runs, else null. */
   readonly url: string | null
-  /** Every reachable base URL (LAN plus tailnet when present), else []. */
+
+  /**
+   * Explicit opt-in to serve plain HTTP when the certificate is missing or
+   * broken. Off means fail closed: enabled but certless stays stopped.
+   */
+  readonly allowInsecure: boolean  /** Every reachable base URL (LAN plus tailnet when present), else []. */
   readonly urls: readonly string[]
   /** True while clients are served over TLS. */
   readonly secure: boolean
@@ -161,6 +166,8 @@ export interface ServerConfig {
   readonly enabled: boolean
   readonly port: number
   readonly token: string | undefined
+  /** Serve plain HTTP when certless. Off (default) fails closed. */
+  readonly allowInsecure: boolean
   /**
    * Issued login sessions (opaque ids, one per paired browser). Persisted so
    * phones stay logged in across restarts; wiped when the token rotates.
@@ -178,6 +185,8 @@ export interface ServerConfig {
 export interface ServerSession {
   readonly id: string
   readonly createdAt: number
+  /** Last request seen with this session; slides the idle expiry. */
+  readonly lastSeen: number
 }
 
 /** One paired device: its own token plus a human name for the settings list. */

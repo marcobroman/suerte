@@ -1,12 +1,12 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { get as httpsGet } from 'node:https'
+import { get as httpsGet, request as httpsRequest } from 'node:https'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import NodeID3 from 'node-id3'
 import { CoverCache, readCoverDataUrl } from '@main/library/covers'
 import { ensureServerCert } from '@main/cert'
-import { clientPathIn, createLibraryServer, insideRoots, lanBaseUrl, lanBaseUrls, trackId, type LibraryServer } from '@main/server'
+import { clientPathIn, createLibraryServer, insideRoots, lanBaseUrl, lanBaseUrls, selectServerTransport, trackId, type LibraryServer } from '@main/server'
 import { writeTrackTags } from '@main/library/tags'
 import type { LibrarySummary } from '@shared/ipc'
 import { createPngBytes } from '../helpers'
@@ -65,18 +65,33 @@ describe('lanBaseUrls', () => {
  * Self-signed test requests opt out of chain verification — exactly what a
  * phone does after confirming the fingerprint once.
  */
-function getInsecure(url: string): Promise<{ status: number; body: string }> {
+function getInsecure(url: string): Promise<{ status: number; body: string; headers: Record<string, string | string[] | undefined> }> {
   return new Promise((resolve, reject) => {
     httpsGet(url, { rejectUnauthorized: false }, (response) => {
       const chunks: Buffer[] = []
       response.on('data', (chunk: Buffer) => chunks.push(chunk))
       response.on('end', () =>
-        resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
+        resolve({
+          status: response.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString('utf8'),
+          headers: response.headers
+        })
       )
       response.on('error', reject)
     }).on('error', reject)
   })
 }
+
+describe('selectServerTransport', () => {
+  const tls = { cert: 'c', key: 'k' }
+
+  it('fails closed without a certificate unless insecure is allowed', () => {
+    expect(selectServerTransport(tls, false)).toBe('https')
+    expect(selectServerTransport(tls, true)).toBe('https')
+    expect(selectServerTransport(null, true)).toBe('http')
+    expect(selectServerTransport(null, false)).toBe('disabled')
+  })
+})
 
 describe('library server', () => {
   let dir = ''
@@ -88,9 +103,11 @@ describe('library server', () => {
   let savedDevices: { token: string; name: string; createdAt: number; lastSeen: number }[] = []
 
   async function start(
-    initial: { id: string; createdAt: number }[] = [],
+    initial: { id: string; createdAt: number; lastSeen?: number }[] = [],
     initialDevices: { token: string; name: string; createdAt: number; lastSeen: number }[] = [],
-    tls: { cert: string; key: string } | null = null
+    tls: { cert: string; key: string } | null = null,
+    readCoverImpl: ((path: string) => Promise<string | null>) | null = null,
+    extraPaths: string[] = []
   ): Promise<string> {
     const covers = new CoverCache()
     const song = join(dir, 'song.mp3')
@@ -120,7 +137,7 @@ describe('library server', () => {
           }
         ]
       },
-      tracks: [entry(song, 'Song'), entry(art, 'Art')],
+      tracks: [entry(song, 'Song'), entry(art, 'Art'), ...extraPaths.map((path) => entry(path, 'Link'))],
       trackCount: 2,
       roots: [dir],
       missingRoots: [],
@@ -130,7 +147,12 @@ describe('library server', () => {
       getPort: () => 0,
       getToken: () => TOKEN,
       getTls: () => tls,
-      getSessions: () => initial,
+      getSessions: () =>
+        initial.map((session) => ({
+          id: session.id,
+          createdAt: session.createdAt,
+          lastSeen: session.lastSeen ?? session.createdAt
+        })),
       saveSessions: (sessions) => {
         savedSessions = [...sessions]
         return Promise.resolve()
@@ -141,7 +163,7 @@ describe('library server', () => {
         return Promise.resolve()
       },
       getSummary: () => summary,
-      readCover: (path) => readCoverDataUrl(path, covers),
+      readCover: (path) => (readCoverImpl ?? ((p) => readCoverDataUrl(p, covers)))(path),
       getRoots: () => [dir],
       getClientDir: () => clientDir
     })
@@ -218,6 +240,58 @@ describe('library server', () => {
     ).toBe(401)
   })
 
+  it('rate-limits handshake attempts per IP with a retry hint', async () => {
+    await start()
+    const attempt = (): Promise<Response> =>
+      fetch(`${base}/api/session`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: 'nope' })
+      })
+
+    for (let i = 0; i < 10; i++) {
+      expect((await attempt()).status).toBe(401)
+    }
+    const limited = await attempt()
+    expect(limited.status).toBe(429)
+    expect(Number(limited.headers.get('retry-after'))).toBeGreaterThan(0)
+  })
+
+  it('sends hardening headers on every response', async () => {
+    await start()
+
+    const response = await fetch(`${base}/api/library?token=${TOKEN}`)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer')
+    expect(response.headers.get('cross-origin-resource-policy')).toBe('same-origin')
+  })
+
+  it('caps concurrent event subscribers', async () => {
+    await start()
+    const controllers: AbortController[] = []
+    const held: Response[] = []
+    try {
+      for (let i = 0; i < 20; i++) {
+        const controller = new AbortController()
+        controllers.push(controller)
+        // Headers complete so the status is known; the unread body keeps
+        // each subscription socket open on both ends.
+        const response = await fetch(`${base}/api/events?token=${TOKEN}`, {
+          signal: controller.signal
+        })
+        expect(response.status).toBe(200)
+        held.push(response)
+      }
+      const refused = await fetch(`${base}/api/events?token=${TOKEN}`)
+      expect(refused.status).toBe(503)
+      await refused.text()
+    } finally {
+      for (const controller of controllers) controller.abort()
+    }
+    expect(held).toHaveLength(20)
+  })
+
   it('issues a login cookie for the token and accepts it without any token', async () => {
     await start()
 
@@ -229,6 +303,9 @@ describe('library server', () => {
     expect(issued.status).toBe(200)
     const setCookie = issued.headers.get('set-cookie')
     expect(setCookie).toMatch(/^onda_session=[0-9a-f]{64}; HttpOnly; Path=\/; SameSite=Strict/)
+    // Plain HTTP cannot set Secure — and sends no HSTS either.
+    expect(setCookie).not.toContain('; Secure')
+    expect(issued.headers.get('strict-transport-security')).toBeNull()
     const cookie = setCookie?.split(';')[0] ?? ''
     expect(savedSessions).toHaveLength(1)
     expect(savedSessions[0]?.id).toHaveLength(64)
@@ -438,6 +515,99 @@ describe('library server', () => {
     expect((await fetch(`${base}/api/library`, { headers: { cookie } })).status).toBe(401)
   })
 
+  it('expires sessions past their absolute or idle lifetime', async () => {
+    const now = Date.now()
+    const day = 24 * 60 * 60 * 1000
+    await start([
+      { id: 'fresh', createdAt: now, lastSeen: now },
+      { id: 'old-absolute', createdAt: now - 31 * day, lastSeen: now },
+      { id: 'old-idle', createdAt: now, lastSeen: now - 8 * day }
+    ])
+
+    expect((await fetch(`${base}/api/library`, { headers: { cookie: 'onda_session=fresh' } })).status).toBe(
+      200
+    )
+    expect(
+      (await fetch(`${base}/api/library`, { headers: { cookie: 'onda_session=old-absolute' } })).status
+    ).toBe(401)
+    expect(
+      (await fetch(`${base}/api/library`, { headers: { cookie: 'onda_session=old-idle' } })).status
+    ).toBe(401)
+  })
+
+  it('expires idle devices, including at the session handshake', async () => {
+    const now = Date.now()
+    const day = 24 * 60 * 60 * 1000
+    await start(
+      [],
+      [{ token: 'stale-device', name: 'Old', createdAt: now - 100 * day, lastSeen: now - 91 * day }]
+    )
+
+    expect((await fetch(`${base}/api/library?token=stale-device`)).status).toBe(401)
+    const handshake = await fetch(`${base}/api/session`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer stale-device' }
+    })
+    expect(handshake.status).toBe(401)
+    expect(handshake.headers.get('set-cookie')).toBeNull()
+  })
+
+  it('logs out a session cookie and kills it', async () => {
+    await start()
+    const issued = await fetch(`${base}/api/session`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}` }
+    })
+    const cookie = issued.headers.get('set-cookie')?.split(';')[0] ?? ''
+    expect((await fetch(`${base}/api/library`, { headers: { cookie } })).status).toBe(200)
+
+    const logout = await fetch(`${base}/api/logout`, { method: 'POST', headers: { cookie } })
+    expect(logout.status).toBe(200)
+    expect(logout.headers.get('set-cookie')).toContain('Max-Age=0')
+
+    expect((await fetch(`${base}/api/library`, { headers: { cookie } })).status).toBe(401)
+    expect(savedSessions).toHaveLength(0)
+  })
+
+  it('logs out a device entirely by its bearer token', async () => {
+    await start()
+    const { code } = server?.issuePairingCode() ?? { code: '' }
+    const paired = await fetch(`${base}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code, name: 'Phone' })
+    })
+    const deviceToken = String(((await paired.json()) as { token?: unknown }).token)
+
+    const logout = await fetch(`${base}/api/logout`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${deviceToken}` }
+    })
+    expect(logout.status).toBe(200)
+
+    expect((await fetch(`${base}/api/library?token=${deviceToken}`)).status).toBe(401)
+    expect(savedDevices).toHaveLength(0)
+  })
+
+  it('leaves the master token alone on logout', async () => {
+    await start()
+
+    const logout = await fetch(`${base}/api/logout`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}` }
+    })
+    expect(logout.status).toBe(200)
+
+    expect((await fetch(`${base}/api/library?token=${TOKEN}`)).status).toBe(200)
+  })
+
+  it('rejects logout without credentials or with GET', async () => {
+    await start()
+
+    expect((await fetch(`${base}/api/logout`, { method: 'POST' })).status).toBe(401)
+    expect((await fetch(`${base}/api/logout?token=${TOKEN}`)).status).toBe(405)
+  })
+
   it('streams whole files with a mime type and range support', async () => {
     await start()
     const id = trackId(join(dir, 'song.mp3'))
@@ -462,8 +632,7 @@ describe('library server', () => {
     expect(past.status).toBe(416)
   })
 
-  it('refuses unknown ids, missing ids, and bad requests', async () => {
-    await start()
+  it('refuses unknown ids, missing ids, and bad requests', async () => {    await start()
     const at = (id: string): string => `${base}/api/stream?id=${encodeURIComponent(id)}&token=${TOKEN}`
 
     // Unknown ids 404: traversal is structurally impossible, and anything
@@ -476,8 +645,32 @@ describe('library server', () => {
     expect((await fetch(`${base}/api/library`, { method: 'POST' })).status).toBe(405)
   })
 
-  it('serves embedded covers and 404s without art', async () => {
-    await start()
+  it('refuses symlink escapes that sit lexically inside roots', async () => {
+    // Directory junctions need no privileges even on Windows, so this is
+    // real coverage everywhere: lexically inside the root, canonically out.
+    const link = join(dir, 'jd')
+    let planted = false
+    for (const type of ['junction', 'dir'] as const) {
+      try {
+        await symlink(outside, link, type)
+        planted = true
+        break
+      } catch {
+        // No link privilege at all: the scan skip plus the canonical check
+        // still cover escapes where links can be planted.
+      }
+    }
+    if (!planted) return
+    const escaped = join(link, 'secret.mp3')
+    await start([], [], null, null, [escaped])
+    const id = trackId(escaped)
+
+    // Both doors stay shut for the escaped path.
+    expect((await fetch(`${base}/api/stream?id=${id}&token=${TOKEN}`)).status).toBe(404)
+    expect((await fetch(`${base}/api/cover?id=${id}&token=${TOKEN}`)).status).toBe(404)
+  })
+
+  it('serves embedded covers and 404s without art', async () => {    await start()
     const artPath = join(dir, 'art.mp3')
     const frame = Buffer.concat([Buffer.from([0xff, 0xfb, 0x90, 0x00]), Buffer.alloc(417 - 4, 0)])
     await writeFile(artPath, Buffer.concat([NodeID3.create({ title: 'T' }), frame, frame]))
@@ -494,6 +687,32 @@ describe('library server', () => {
 
     const missing = await fetch(at(trackId(join(dir, 'song.mp3'))))
     expect(missing.status).toBe(404)
+  })
+
+  it('refuses hostile cover types instead of reflecting them', async () => {
+    const hostile = `data:text/html;base64,${Buffer.from('<script>alert(1)</script>').toString('base64')}`
+    await start([], [], null, () => Promise.resolve(hostile))
+    const id = trackId(join(dir, 'song.mp3'))
+
+    const response = await fetch(`${base}/api/cover?id=${id}&token=${TOKEN}`)
+    expect(response.status).toBe(404)
+  })
+
+  it('serves allowed covers with anti-sniffing headers', async () => {
+    await start()
+    const artPath = join(dir, 'art.mp3')
+    const frame = Buffer.concat([Buffer.from([0xff, 0xfb, 0x90, 0x00]), Buffer.alloc(417 - 4, 0)])
+    await writeFile(artPath, Buffer.concat([NodeID3.create({ title: 'T' }), frame, frame]))
+    const embedded = await writeTrackTags(artPath, {
+      art: { mime: 'image/png', data: createPngBytes() }
+    })
+    expect(embedded.ok).toBe(true)
+
+    const response = await fetch(`${base}/api/cover?id=${trackId(artPath)}&token=${TOKEN}`)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe('image/png')
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(response.headers.get('content-security-policy')).toContain("default-src 'none'")
   })
 
   it('pushes library changes to event subscribers', async () => {
@@ -518,12 +737,28 @@ describe('library server', () => {
       await reader.cancel()
     }
   })
-
   it('stops listening on demand', async () => {
     await start()
     await server?.stop()
 
     await expect(fetch(`${base}/api/library?token=${TOKEN}`)).rejects.toThrow()
+  })
+
+  it('survives aborted streams and missing files mid-request', async () => {
+    await start()
+    const id = trackId(join(dir, 'song.mp3'))
+    const url = `${base}/api/stream?id=${id}&token=${TOKEN}`
+
+    const controller = new AbortController()
+    const pending = fetch(url, { signal: controller.signal })
+    controller.abort()
+    await expect(pending).rejects.toThrow()
+
+    // A file vanishing before the stat ends the request, not the process.
+    await rm(join(dir, 'song.mp3'))
+    expect((await fetch(url)).status).toBe(404)
+
+    expect((await fetch(`${base}/api/library?token=${TOKEN}`)).status).toBe(200)
   })
 
   it('serves the client shell publicly with an SPA fallback', async () => {
@@ -570,5 +805,39 @@ describe('library server', () => {
     const response = await getInsecure(`${secureBase}/api/library?token=${TOKEN}`)
     expect(response.status).toBe(200)
     expect(JSON.parse(response.body)).toMatchObject({ trackCount: 2 })
+    expect(response.headers['strict-transport-security']).toBe('max-age=31536000')
+  })
+
+  it('marks the session cookie Secure over TLS', async () => {
+    const identity = await ensureServerCert(clientDir)
+    await server?.stop()
+    await start([], [], { cert: identity.cert, key: identity.key })
+    const secureBase = base.replace('http://', 'https://')
+
+    const status = await new Promise<{ status: number; headers: string[] }>((resolve, reject) => {
+      const request = httpsRequest(
+        `${secureBase}/api/session`,
+        {
+          method: 'POST',
+          rejectUnauthorized: false,
+          headers: { authorization: `Bearer ${TOKEN}` }
+        },
+        (response) => {
+          response.resume()
+          response.on('end', () =>
+            resolve({
+              status: response.statusCode ?? 0,
+              headers: (response.headers['set-cookie'] as string[] | undefined) ?? []
+            })
+          )
+          response.on('error', reject)
+        }
+      )
+      request.on('error', reject)
+      request.end()
+    })
+
+    expect(status.status).toBe(200)
+    expect(status.headers.join(';')).toContain('; Secure')
   })
 })

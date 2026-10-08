@@ -5,7 +5,7 @@ import { app, BrowserWindow, shell } from 'electron'
 import { loadConfig, saveConfig } from './config'
 import { ensureServerCert } from './cert'
 import { createIpcContext, registerIpc, rescan } from './ipc'
-import { createLibraryServer } from './server'
+import { createLibraryServer, selectServerTransport } from './server'
 import { readCoverDataUrl } from './library/covers'
 
 // Resolved eagerly because app.getPath is unavailable until the app is ready.
@@ -71,6 +71,7 @@ app.whenReady().then(async () => {
         enabled: ipcContext.serverConfig.enabled,
         port: ipcContext.serverConfig.port,
         token: ipcContext.serverConfig.token,
+        allowInsecure: ipcContext.serverConfig.allowInsecure,
         sessions: [...ipcContext.serverConfig.sessions],
         devices: ipcContext.serverConfig.devices.map((device) => ({ ...device }))
       }
@@ -122,14 +123,19 @@ app.whenReady().then(async () => {
     try {
       ipcContext.serverTls = await ensureServerCert(userDataDir)
     } catch {
-      // No identity: the server still starts over plain HTTP below.
+      // No identity: fail closed below unless the user allowed insecure.
       ipcContext.serverTls = null
     }
-    try {
-      await ipcContext.server.start()
-    } catch {
-      // A taken port at launch leaves the server stopped; enabling it again
-      // later retries. Nothing else about startup depends on it.
+    if (selectServerTransport(ipcContext.serverTls, ipcContext.serverConfig.allowInsecure) === 'disabled') {
+      // Enabled but certless and no fallback: stays stopped with a null URL,
+      // and the next enable retries. Nothing else about startup depends on it.
+    } else {
+      try {
+        await ipcContext.server.start()
+      } catch {
+        // A taken port at launch leaves the server stopped; enabling it again
+        // later retries. Nothing else about startup depends on it.
+      }
     }
   }
 

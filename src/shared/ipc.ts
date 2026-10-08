@@ -20,6 +20,7 @@ export const IPC = {
   fetchDiscogsArt: 'discogs:art',
   setServerEnabled: 'server:set-enabled',
   setServerPort: 'server:set-port',
+  setServerInsecure: 'server:set-insecure',
   regenerateServerToken: 'server:regenerate-token',
   regenerateServerCert: 'server:regenerate-cert',
   getServerToken: 'server:get-token',
@@ -93,6 +94,11 @@ export interface IpcApi {
   fetchDiscogsArt(url: unknown): Promise<DiscogsArtOutcome>
   setServerEnabled(on: unknown): Promise<AppSettings>
   setServerPort(port: unknown): Promise<AppSettings>
+  /**
+   * Allows plain HTTP when the certificate is missing or broken. Takes
+   * effect immediately on a running server. Off fails closed.
+   */
+  setServerInsecure(on: unknown): Promise<AppSettings>
   regenerateServerToken(): Promise<AppSettings>
   /**
    * Rotates the TLS certificate (new fingerprint — phones re-trust once).

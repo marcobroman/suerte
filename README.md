@@ -133,7 +133,7 @@ The server binds all interfaces, so joining a private tailnet is enough for secu
 
 1. Install Tailscale on the PC and the phone, logging into the same account on both.
 2. In Onda Settings, enable serving and pick the `https://100.x.x.x:…` address from the listed URLs (the tailnet one, not the home-LAN one).
-3. Pair with the QR code as above; the browser warns about the self-signed certificate once — compare its fingerprint to Settings, then trust it.
+3. Pair with the QR code as above; the browser warns about the self-signed certificate once — compare its fingerprint to Settings, then trust it. The boot screen shows the expected fingerprint and stays locked until you confirm the match.
 
 Revoking a device in Settings logs that phone out immediately; rotating the access token logs out every phone; rotating the certificate only asks phones to confirm the new fingerprint once. Each listed address has its own QR / copy-link buttons so remote pairing uses the tailnet URL; hiding a QR, generating a new code, or closing Settings kills its pairing code immediately (quitting the app wipes all outstanding codes).
 
@@ -152,5 +152,5 @@ Small preferences and library roots live in `library.json` inside the Electron u
 
 - Tag writing supports MP3 files only; other formats open as read-only in tag flows.
 - Auto-tag needs network access and a Discogs token; cover art embeds JPEG/PNG only.
-- The server speaks HTTPS with a self-signed certificate (generated on first enable) once a certificate exists, and plain HTTP otherwise. Phones authenticate with per-device tokens traded for an `HttpOnly` session cookie, so tokens stay out of URLs; the master token never leaves the desktop — pairing codes are single-use, expire after 10 minutes, and die when their QR is hidden or the app quits.
+- The server speaks HTTPS with a self-signed certificate (generated on first enable) once a certificate exists, and stays stopped otherwise unless unencrypted fallback is explicitly allowed in Settings. The certificate names the machine's LAN and tailnet addresses and renews automatically when they change. Phones authenticate with per-device tokens traded for an `HttpOnly` (`Secure` over TLS) session cookie, so tokens stay out of URLs; the master token never leaves the desktop — pairing codes are single-use, expire after 10 minutes, and die when their QR is hidden or the app quits. Sessions expire after 30 days (7 idle) and idle devices after 90 days; expiry is silent while the device is valid, otherwise the phone returns to pairing with an explanation, and a Log-out button ends the pairing on demand. Handshake endpoints are per-IP rate-limited, event subscribers are capped, and all responses carry `nosniff` / `no-referrer` / same-origin hardening headers (plus HSTS over TLS).
 - The suite is a local audio library workflow: substantial test coverage exists around scanning, cache behavior, metadata handling, queue/engine logic, streaming server, TLS/pairing/session auth, and EQ math. The phone client reuses the desktop UI over the LAN API; PWA offline support is future work.

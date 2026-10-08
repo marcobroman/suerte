@@ -65,12 +65,25 @@ export function saveServerCredentials(storage: KeyValueStorage, creds: ServerCre
   storage.setItem(SERVER_CREDS_KEY, JSON.stringify(creds))
 }
 
+/** Minimal removal surface; `window.localStorage` satisfies it in browsers. */
+export interface RemovableStorage {
+  removeItem(key: string): void
+}
+
+/** Forgets a pairing (logged-out or revoked phone); the boot screen returns. */
+export function clearServerCredentials(storage: RemovableStorage): void {
+  storage.removeItem(SERVER_CREDS_KEY)
+}
+
 /**
  * Phone boot entry: the QR code and copy-link carry the token in the fragment,
  * which browsers never send to the server, so it cannot leak into access logs.
+ * The server's certificate fingerprint rides along the same way so the phone
+ * can show it for trust-on-first-use comparison.
  */
-export function phoneEntryUrl(baseUrl: string, token: string): string {
-  return `${baseUrl.replace(/\/+$/, '')}/#t=${encodeURIComponent(token)}`
+export function phoneEntryUrl(baseUrl: string, token: string, fingerprint: string | null = null): string {
+  const base = `${baseUrl.replace(/\/+$/, '')}/#t=${encodeURIComponent(token)}`
+  return fingerprint ? `${base}&fp=${encodeURIComponent(fingerprint)}` : base
 }
 
 /** Inverse of phoneEntryUrl for the boot screen; null when absent. */
@@ -113,8 +126,9 @@ export function describeServerUrl(url: string): ServerUrlKind {
  * the fragment (never the master token), which the phone trades for its own
  * device token. Same fragment discipline as phoneEntryUrl.
  */
-export function phonePairUrl(baseUrl: string, code: string): string {
-  return `${baseUrl.replace(/\/+$/, '')}/#pair=${encodeURIComponent(code)}`
+export function phonePairUrl(baseUrl: string, code: string, fingerprint: string | null = null): string {
+  const base = `${baseUrl.replace(/\/+$/, '')}/#pair=${encodeURIComponent(code)}`
+  return fingerprint ? `${base}&fp=${encodeURIComponent(fingerprint)}` : base
 }
 
 /** Inverse of phonePairUrl for the boot screen; null when absent. */
@@ -124,6 +138,22 @@ export function pairFromHash(hash: string): string | null {
   try {
     const code = decodeURIComponent(match[1])
     return code === '' ? null : code
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Expected certificate fingerprint from a boot link (`#...&fp=...`); null
+ * when the link predates fingerprints. The phone cannot read TLS details
+ * itself, so this is shown for manual comparison before connecting.
+ */
+export function fingerprintFromHash(hash: string): string | null {
+  const match = /(?:^|&)fp=([^&]*)/.exec(hash.startsWith('#') ? hash.slice(1) : hash)
+  if (!match?.[1]) return null
+  try {
+    const fingerprint = decodeURIComponent(match[1])
+    return fingerprint === '' ? null : fingerprint
   } catch {
     return null
   }
@@ -161,6 +191,19 @@ async function readJson<T>(response: Response): Promise<T> {
     throw new Error(`Request failed (${response.status}).`)
   }
   return (await response.json()) as T
+}
+
+/**
+ * Thrown when the server rejects even a fresh login: the device itself is
+ * gone (idle-revoked, or manually revoked on the desktop). Unlike a wrong
+ * token or a dead server, the remedy is re-pairing — callers route back to
+ * the boot screen instead of showing a retryable error.
+ */
+export class LoggedOutError extends Error {
+  constructor() {
+    super('This phone was logged out — pair it again from the desktop app.')
+    this.name = 'LoggedOutError'
+  }
 }
 
 /**
@@ -249,7 +292,37 @@ export class HttpBackend implements Backend {
 
   async #get<T>(path: string, params: Record<string, string> = {}): Promise<T> {
     await this.startSession()
-    return readJson<T>(await fetch(this.#url(path, params), { headers: this.#headers() }))
+    const response = await fetch(this.#url(path, params), { headers: this.#headers() })
+    if (response.status !== 401) return readJson<T>(response)
+    // The cookie may have died server-side (expiry or revoke) while this
+    // client still believed it was logged in: one silent re-login, then
+    // replay the request. A 401 here proves the server is reachable, so a
+    // failed re-handshake means the device itself is gone — logged out.
+    this.#sessionReady = false
+    try {
+      await this.startSession()
+    } catch {
+      throw new LoggedOutError()
+    }
+    const retry = await fetch(this.#url(path, params), { headers: this.#headers() })
+    if (retry.status === 401) throw new LoggedOutError()
+    return readJson<T>(retry)
+  }
+
+  /**
+   * Logs this phone out: the server revokes the calling credential (session
+   * or device) and clears the cookie. Stored credentials are the caller's to
+   * clear — this only ends the server side.
+   */
+  async logout(): Promise<void> {
+    const response = await fetch(`${this.#baseUrl}/api/logout`, {
+      method: 'POST',
+      headers: this.#headers()
+    })
+    if (!response.ok && response.status !== 401) {
+      throw new Error(`Logout failed (${response.status}).`)
+    }
+    // A 401 here just means there was nothing left to kill.
   }
 
   async pickFolders(): Promise<string[]> {
@@ -295,6 +368,7 @@ export class HttpBackend implements Backend {
         enabled: true,
         port: DEFAULT_SERVER_PORT,
         tokenSet: true,
+        allowInsecure: false,
         url: this.#baseUrl,
         urls: [this.#baseUrl],
         // The phone trusts at the platform level (system trust prompt on
@@ -336,6 +410,10 @@ export class HttpBackend implements Backend {
   }
 
   async setServerPort(): Promise<AppSettings> {
+    throw unsupported('Server settings')
+  }
+
+  async setServerInsecure(): Promise<AppSettings> {
     throw unsupported('Server settings')
   }
 
@@ -402,15 +480,29 @@ export class HttpBackend implements Backend {
 
   onLibraryChanged(callback: (summary: LibrarySummary) => void): () => void {
     // EventSource cannot send headers, but same-origin requests carry the
-    // session cookie automatically. Before login ?token= is the fallback.
-    const source = new EventSource(this.#url('/api/events'))
-    source.onmessage = (event: MessageEvent) => {
-      try {
-        callback(toLibrarySummary(JSON.parse(event.data as string) as PublicLibrarySummary))
-      } catch {
-        // A malformed push must never take the subscription down.
-      }
+    // session cookie automatically — so the subscription waits for login and
+    // the token stays out of the URL entirely. If login fails there is
+    // nothing to subscribe to (callers load the library first and will have
+    // already surfaced that failure).
+    let source: EventSource | null = null
+    let closed = false
+    void this.startSession().then(
+      () => {
+        if (closed) return
+        source = new EventSource(this.#url('/api/events'))
+        source.onmessage = (event: MessageEvent) => {
+          try {
+            callback(toLibrarySummary(JSON.parse(event.data as string) as PublicLibrarySummary))
+          } catch {
+            // A malformed push must never take the subscription down.
+          }
+        }
+      },
+      () => undefined
+    )
+    return () => {
+      closed = true
+      source?.close()
     }
-    return () => source.close()
   }
 }

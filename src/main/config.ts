@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { DEFAULT_SERVER_PORT, DEFAULT_THEME, EQ_BAND_COUNT, isThemeId, type DeviceRecord, type PersistedEqSettings, type ServerConfig, type ServerSession, type ThemeId } from '@shared/types'
 
@@ -123,6 +123,7 @@ export function normalizeServerConfig(value: unknown): ServerConfig | undefined 
         ? port
         : DEFAULT_SERVER_PORT,
     token: normalizeToken(record['token']),
+    allowInsecure: record['allowInsecure'] === true,
     sessions: normalizeServerSessions(record['sessions']),
     devices: normalizeDeviceRecords(record['devices'])
   }
@@ -131,7 +132,8 @@ export function normalizeServerConfig(value: unknown): ServerConfig | undefined 
 /**
  * Shape-checks persisted login sessions. A hand-edited or corrupt entry is
  * dropped rather than trusted; an empty list simply means "no phones logged
- * in", which is always a safe fallback.
+ * in", which is always a safe fallback. Entries predating `lastSeen` backfill
+ * it from creation so the upgrade itself logs nobody out.
  */
 export function normalizeServerSessions(value: unknown): ServerSession[] {
   if (!Array.isArray(value)) return []
@@ -142,10 +144,15 @@ export function normalizeServerSessions(value: unknown): ServerSession[] {
     const record = entry as Record<string, unknown>
     const id = record['id']
     const createdAt = record['createdAt']
+    const lastSeen = record['lastSeen']
     if (typeof id !== 'string' || id === '' || seen.has(id)) continue
     if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) continue
     seen.add(id)
-    sessions.push({ id, createdAt })
+    sessions.push({
+      id,
+      createdAt,
+      lastSeen: typeof lastSeen === 'number' && Number.isFinite(lastSeen) ? lastSeen : createdAt
+    })
   }
   return sessions
 }
@@ -203,6 +210,20 @@ export async function saveConfig(
   const temporary = `${target}.tmp`
   await mkdir(directory, { recursive: true })
   await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, 'utf8')
+  // This file holds login-equivalent secrets (server token, sessions, device
+  // tokens, Discogs token): owner-only permissions where the platform
+  // supports them, same best-effort pattern as the TLS key file.
+  try {
+    await chmod(temporary, 0o600)
+  } catch {
+    // Windows has no POSIX modes; the user-data dir is already user-private.
+  }
   await rename(temporary, target)
+  try {
+    // Rename can reset modes on some platforms; lock down the final file too.
+    await chmod(target, 0o600)
+  } catch {
+    // Best effort, as above.
+  }
   return config
 }

@@ -32,7 +32,7 @@ import {
   type Selection
 } from './library/view'
 import type { PlaybackControls } from './usePlaybackEngine'
-import { phonePairUrl, describeServerUrl } from './http-backend'
+import { phonePairUrl, describeServerUrl, LoggedOutError, type HttpBackend } from './http-backend'
 import type { Backend } from './backend'
 import { ViewportDebug } from './ViewportDebug'
 
@@ -41,9 +41,11 @@ export interface AppProps {
   readonly playback: PlaybackControls
   /** Phone client: desktop-only surfaces (folders, tagging, server admin) stay hidden. */
   readonly phone: boolean
+  /** Phone only: the device was logged out (expiry/revoke) — return to boot. */
+  readonly onLoggedOut?: () => void
 }
 
-export function App({ backend, playback, phone }: AppProps) {
+export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
   const [summary, setSummary] = useState<LibrarySummary | null>(null)
   const [theme, setThemeState] = useState<ThemeId>(() =>
     resolveTheme(document.documentElement.dataset.theme)
@@ -60,6 +62,7 @@ export function App({ backend, playback, phone }: AppProps) {
     enabled: false,
     port: DEFAULT_SERVER_PORT,
     tokenSet: false,
+    allowInsecure: false,
     url: null,
     urls: [],
     secure: false,
@@ -75,6 +78,12 @@ export function App({ backend, playback, phone }: AppProps) {
   const [qrBase, setQrBase] = useState<string | null>(null)
   /** Expiry epoch ms of the displayed code, for the "valid until" caption. */
   const [qrExpiry, setQrExpiry] = useState<number | null>(null)
+  /**
+   * Outstanding copy-link codes per base URL. Copying burns the previous
+   * link code for that base, so at most one link code is ever live — the
+   * same single-code discipline the QR display already keeps.
+   */
+  const linkCodes = useRef(new Map<string, string>())
   const [portDraft, setPortDraft] = useState('')
   const [serverBusy, setServerBusy] = useState(false)
   const [serverMessage, setServerMessage] = useState('')
@@ -117,6 +126,9 @@ export function App({ backend, playback, phone }: AppProps) {
 
   const playbackRef = useRef(playback)
   playbackRef.current = playback
+  // Latest callback without resubscribing the library effect below.
+  const loggedOutRef = useRef(onLoggedOut)
+  loggedOutRef.current = onLoggedOut
 
   useEffect(() => {
     const unsubscribeProgress = backend.onScanProgress((progress) => {
@@ -136,7 +148,15 @@ export function App({ backend, playback, phone }: AppProps) {
         // Roots on desktop, tracks on phone (whose roots are always empty).
         if (next.roots.length > 0 || next.trackCount > 0) setScanStatus('ready')
       })
-      .catch((error: unknown) => setScanStatus(`error: ${String(error)}`))
+      .catch((error: unknown) => {
+        // Logged out mid-life (expiry or desktop revoke): no retry makes
+        // sense here — hand back to the boot screen instead of an error.
+        if (error instanceof LoggedOutError) {
+          loggedOutRef.current?.()
+          return
+        }
+        setScanStatus(`error: ${String(error)}`)
+      })
     return () => {
       unsubscribeProgress()
       unsubscribeLibrary()
@@ -214,7 +234,7 @@ export function App({ backend, playback, phone }: AppProps) {
         (settings) => {
           refreshServerState(settings)
           if (next && settings.server.url === null) {
-            setServerMessage('Could not listen — the port may be taken.')
+            setServerMessage('Could not listen — the port may be taken, or the certificate is missing.')
           }
         },
         () => setServerMessage('Could not change the server.')
@@ -269,8 +289,25 @@ export function App({ backend, playback, phone }: AppProps) {
       .finally(() => setServerBusy(false))
   }, [backend, refreshServerState])
 
-  const regenerateServerCert = useCallback(() => {
+  const toggleInsecure = useCallback(() => {
+    const next = !serverState.allowInsecure
     setServerBusy(true)
+    setServerMessage('')
+    void backend
+      .setServerInsecure(next)
+      .then(
+        (settings) => {
+          refreshServerState(settings)
+          if (!next && settings.server.enabled && settings.server.url === null) {
+            setServerMessage('Unencrypted fallback off — the server stopped.')
+          }
+        },
+        () => setServerMessage('Could not change the fallback.')
+      )
+      .finally(() => setServerBusy(false))
+  }, [backend, serverState.allowInsecure, refreshServerState])
+
+  const regenerateServerCert = useCallback(() => {    setServerBusy(true)
     setQrDataUrl(null)
     setQrCode(null)
     setQrBase(null)
@@ -310,8 +347,14 @@ export function App({ backend, playback, phone }: AppProps) {
 
   const showQrCode = useCallback(
     async (base: string) => {
-      // The outgoing code dies first, so at most one displayed code is ever live.
+      // The outgoing codes die first, so showing a QR never leaves two live
+      // codes for the same address (displayed or previously copied).
       burnDisplayedCode()
+      const liveLink = linkCodes.current.get(base)
+      if (liveLink !== undefined) {
+        linkCodes.current.delete(base)
+        void backend.burnPairingCode(liveLink).catch(() => undefined)
+      }
       setServerBusy(true)
       try {
         // Pairing entry, not API: the boot screen reads the single-use code
@@ -326,7 +369,12 @@ export function App({ backend, playback, phone }: AppProps) {
         setQrCode(pairing.code)
         setQrBase(base)
         setQrExpiry(pairing.expiresAt)
-        setQrDataUrl(await QRCode.toDataURL(phonePairUrl(base, pairing.code), { width: 200, margin: 1 }))
+        setQrDataUrl(
+          await QRCode.toDataURL(phonePairUrl(base, pairing.code, serverState.fingerprint), {
+            width: 200,
+            margin: 1
+          })
+        )
       } catch {
         setServerMessage('Could not generate the QR code.')
         clearQrDisplay()
@@ -334,23 +382,41 @@ export function App({ backend, playback, phone }: AppProps) {
         setServerBusy(false)
       }
     },
-    [backend, burnDisplayedCode, clearQrDisplay]
+    [backend, burnDisplayedCode, clearQrDisplay, serverState.fingerprint]
   )
 
   const renewQrCode = useCallback(() => {
     if (qrBase !== null) void showQrCode(qrBase)
   }, [qrBase, showQrCode])
 
+  const logoutPhone = useCallback(() => {
+    if (!phone) return
+    // PhoneRoot always hands an HttpBackend here; the cast narrows the
+    // shared Backend seam to the phone-only logout call.
+    const httpBackend = backend as HttpBackend
+    setServerBusy(true)
+    void httpBackend
+      .logout()
+      .catch(() => undefined)
+      .then(() => loggedOutRef.current?.())
+  }, [backend, phone])
+
   const copyPairLink = useCallback(
     async (base: string) => {
       setServerBusy(true)
       try {
+        const previous = linkCodes.current.get(base)
+        if (previous !== undefined) {
+          linkCodes.current.delete(base)
+          void backend.burnPairingCode(previous).catch(() => undefined)
+        }
         const pairing = await backend.getPairingCode()
         if (!pairing) {
           setServerMessage('Could not create a pairing code.')
           return
         }
-        await navigator.clipboard.writeText(phonePairUrl(base, pairing.code))
+        linkCodes.current.set(base, pairing.code)
+        await navigator.clipboard.writeText(phonePairUrl(base, pairing.code, serverState.fingerprint))
         setServerMessage('Copied — open it on the phone within 10 minutes.')
       } catch {
         setServerMessage('Copy failed — generate a QR code instead.')
@@ -358,7 +424,7 @@ export function App({ backend, playback, phone }: AppProps) {
         setServerBusy(false)
       }
     },
-    [backend]
+    [backend, serverState.fingerprint]
   )
 
   // Closing Settings with a QR on screen discards it like Hide does: the
@@ -1011,7 +1077,9 @@ export function App({ backend, playback, phone }: AppProps) {
                         <p className="settings-note">
                           {serverState.secure
                             ? 'Encrypted — phones connect over TLS. Confirm this fingerprint on first connect:'
-                            : 'Not encrypted — the server runs plain HTTP.'}
+                            : serverState.url !== null
+                              ? 'NOT encrypted — the server runs plain HTTP. Prefer fixing the certificate over keeping this.'
+                              : 'Not encrypted — the server runs plain HTTP.'}
                         </p>
                         {serverState.fingerprint !== null && (
                           <p className="settings-note token-value">{serverState.fingerprint}</p>
@@ -1031,6 +1099,15 @@ export function App({ backend, playback, phone }: AppProps) {
                         >
                           New certificate
                         </button>
+                        <label className="settings-check">
+                          <input
+                            type="checkbox"
+                            checked={serverState.allowInsecure}
+                            disabled={serverBusy}
+                            onChange={toggleInsecure}
+                          />{' '}
+                          Allow unencrypted fallback if the certificate fails
+                        </label>
                         <p className="settings-label">Connected devices</p>
                         {serverState.devices.length === 0 ? (
                           <p className="settings-note">
@@ -1059,6 +1136,20 @@ export function App({ backend, playback, phone }: AppProps) {
                       </>
                     )}
                     {serverMessage !== '' && <p className="settings-note">{serverMessage}</p>}
+                      </>
+                    )}
+                    {phone && (
+                      <>
+                        <p className="settings-label">This phone</p>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="settings-item"
+                          disabled={serverBusy}
+                          onClick={logoutPhone}
+                        >
+                          Log out this phone
+                        </button>
                       </>
                     )}
                     <p className="settings-label">Theme</p>

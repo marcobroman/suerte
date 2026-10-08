@@ -55,7 +55,10 @@ async function collectAudioFiles(roots: readonly string[]): Promise<string[]> {
     }
 
     for (const entry of entries) {
-      if (!entry.isFile()) continue
+      // Symlinks never enter the index: a linked file could resolve outside
+      // the roots, and only the serve-time canonical check could catch it.
+      // (Dirent.isFile() is already false for links; this names the policy.)
+      if (!entry.isFile() || entry.isSymbolicLink()) continue
       const full = join(entry.parentPath, entry.name)
       if (isAudioFile(full)) seen.add(full)
     }

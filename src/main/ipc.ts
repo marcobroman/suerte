@@ -1,4 +1,5 @@
 ﻿import { randomBytes } from 'node:crypto'
+import { realpath } from 'node:fs/promises'
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { AUDIO_EXTENSIONS } from '@shared/audio-files'
 import { IPC, LIBRARY_CHANGED_CHANNEL, SCAN_PROGRESS_CHANNEL, type DiscogsArtOutcome, type DiscogsFailure, type DiscogsReleaseOutcome, type DiscogsSearchOutcome, type LibrarySummary, type TagUpdateItem, type TagUpdateOutcome } from '@shared/ipc'
@@ -12,7 +13,7 @@ import { LibraryCache } from './library/cache'
 import { findMissingRoots } from './library/roots'
 import { scanLibrary } from './library/scan'
 import { sanitizeTagEdits, writeTrackTags } from './library/tags'
-import { lanBaseUrl, lanBaseUrls, type LibraryServer } from './server'
+import { lanBaseUrl, lanBaseUrls, selectServerTransport, insideRoots, type LibraryServer } from './server'
 import { readAudioBytes } from './util/read-bytes'
 
 /**
@@ -51,7 +52,7 @@ export function createIpcContext(
     theme,
     discogsToken: undefined,
     eq: undefined,
-    serverConfig: { enabled: false, port: DEFAULT_SERVER_PORT, token: undefined, sessions: [], devices: [] },
+    serverConfig: { enabled: false, port: DEFAULT_SERVER_PORT, token: undefined, sessions: [], devices: [], allowInsecure: false },
     server: null,
     serverTls: null,
     tree: { artists: [], albums: [] },
@@ -132,6 +133,7 @@ function settingsOf(context: IpcContext): AppSettings {
       enabled: context.serverConfig.enabled,
       port: context.serverConfig.port,
       tokenSet: context.serverConfig.token !== undefined,
+      allowInsecure: context.serverConfig.allowInsecure,
       url: running
         ? (lanBaseUrl(context.serverConfig.port, tls.secure) ??
           `${tls.secure ? 'https' : 'http'}://localhost:${context.serverConfig.port}`)
@@ -150,6 +152,7 @@ function serverConfigOf(context: IpcContext): ServerConfig {
     enabled: context.serverConfig.enabled,
     port: context.serverConfig.port,
     token: context.serverConfig.token,
+    allowInsecure: context.serverConfig.allowInsecure,
     sessions: [...context.serverConfig.sessions],
     devices: context.serverConfig.devices.map((device) => ({ ...device }))
   }
@@ -161,6 +164,31 @@ function discogsFailure(error: unknown): DiscogsFailure {
     kind: 'network',
     message: error instanceof Error ? error.message : 'Discogs request failed.'
   }
+}
+
+/**
+ * Renderer-supplied paths are untrusted: resolve symlinks and require the
+ * result to sit under a configured root, or throw a generic error that
+ * reveals nothing about what exists. Callers surface per-file failures.
+ */
+async function containedPath(context: IpcContext, path: unknown): Promise<string> {
+  if (typeof path !== 'string' || path === '') throw new Error('unknown file')
+  let real: string
+  try {
+    real = await realpath(path)
+  } catch {
+    throw new Error('unknown file')
+  }
+  const roots: string[] = []
+  for (const root of context.roots) {
+    try {
+      roots.push(await realpath(root))
+    } catch {
+      // Unreachable roots cannot contain anything right now.
+    }
+  }
+  if (!insideRoots(roots, real)) throw new Error('unknown file')
+  return real
 }
 
 export function registerIpc(context: IpcContext): void {
@@ -242,20 +270,44 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
     if (on) {
       // The TLS identity is minted before the first listen so the server
       // never serves plain HTTP in production. If generation fails the
-      // server starts without it rather than not at all.
+      // transport selector fails closed below instead of starting HTTP.
       try {
         context.serverTls = await ensureServerCert(context.configDir)
       } catch {
         context.serverTls = null
       }
-      try {
-        await context.server?.start()
-      } catch {
-        // A taken port leaves the server stopped; the URL stays null so the
-        // UI shows it as unreachable instead of pretending otherwise.
+      if (selectServerTransport(context.serverTls, context.serverConfig.allowInsecure) !== 'disabled') {
+        try {
+          await context.server?.start()
+        } catch {
+          // A taken port leaves the server stopped; the URL stays null so the
+          // UI shows it as unreachable instead of pretending otherwise.
+        }
       }
     } else {
       await context.server?.stop()
+    }
+    return settingsOf(context)
+  })
+
+  ipcMain.handle(IPC.setServerInsecure, async (_event, on: unknown): Promise<AppSettings> => {
+    if (typeof on !== 'boolean') return settingsOf(context)
+    context.serverConfig = { ...context.serverConfig, allowInsecure: on }
+    await persistConfig()
+    // The policy takes effect immediately: disabling the fallback stops a
+    // running plain-HTTP server, enabling it starts a stopped one.
+    if (context.server?.listening) {
+      await context.server.stop()
+    }
+    if (
+      context.serverConfig.enabled &&
+      selectServerTransport(context.serverTls, context.serverConfig.allowInsecure) !== 'disabled'
+    ) {
+      try {
+        await context.server?.start()
+      } catch {
+        // Same taken-port story: stopped with a null URL.
+      }
     }
     return settingsOf(context)
   })
@@ -329,12 +381,14 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
     return settingsOf(context)
   })
 
-  ipcMain.handle(IPC.readFile, (_event, path: string) => readAudioBytes(path))
+  ipcMain.handle(IPC.readFile, async (_event, path: string) => readAudioBytes(await containedPath(context, path)))
 
-  ipcMain.handle(IPC.readCover, (_event, path: string) => readCoverDataUrl(path, context.covers))
+  ipcMain.handle(IPC.readCover, (_event, path: string) =>
+    containedPath(context, path).then((file) => readCoverDataUrl(file, context.covers))
+  )
 
-  ipcMain.handle(IPC.revealInExplorer, (_event, path: string) => {
-    shell.showItemInFolder(path)
+  ipcMain.handle(IPC.revealInExplorer, async (_event, path: string) => {
+    shell.showItemInFolder(await containedPath(context, path))
   })
 
   ipcMain.handle(IPC.updateTags, async (_event, items: unknown): Promise<TagUpdateOutcome> => {    // Bulk edits never fail atomically: every file reports its own result.
@@ -345,7 +399,18 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
       if (typeof candidate?.path !== 'string' || candidate.path === '') {
         continue
       }
-      results.push(await writeTrackTags(candidate.path, sanitizeTagEdits(candidate.edits)))
+      let file: string
+      try {
+        file = await containedPath(context, candidate.path)
+      } catch {
+        results.push({
+          path: candidate.path,
+          ok: false,
+          error: { kind: 'unreadable', message: 'Outside the music library.' }
+        })
+        continue
+      }
+      results.push(await writeTrackTags(file, sanitizeTagEdits(candidate.edits)))
     }
     const scan = await runScan(context)
     return { results, scan }

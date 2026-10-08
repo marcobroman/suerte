@@ -2,7 +2,7 @@
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { CoverCache, readCoverDataUrl } from '@main/library/covers'
+import { CoverCache, normalizeCoverMime, readCoverDataUrl } from '@main/library/covers'
 import { createPngBytes, createWavBytes, createWavWithTagsBytes } from '../helpers'
 
 describe('CoverCache', () => {
@@ -132,6 +132,36 @@ describe('readCoverDataUrl', () => {
     const path = await write('art.wav', createWavWithTagsBytes())
 
     expect(await readCoverDataUrl(path, cache)).toBe(await readCoverDataUrl(path, cache))
+  })
+
+  it('drops a hostile embedded mime instead of serving it', async () => {
+    const path = await write(
+      'evil.wav',
+      createWavWithTagsBytes({
+        mime: 'text/html',
+        coverBytes: Buffer.from('<script>alert(1)</script>')
+      })
+    )
+
+    expect(await readCoverDataUrl(path, cache)).toBeNull()
+  })
+})
+
+describe('normalizeCoverMime', () => {
+  it('allows images and canonicalizes the jpg alias', () => {
+    expect(normalizeCoverMime('image/jpeg')).toBe('image/jpeg')
+    expect(normalizeCoverMime('image/png')).toBe('image/png')
+    expect(normalizeCoverMime('image/gif')).toBe('image/gif')
+    expect(normalizeCoverMime('image/webp')).toBe('image/webp')
+    expect(normalizeCoverMime('image/jpg')).toBe('image/jpeg')
+    expect(normalizeCoverMime(' IMAGE/PNG ')).toBe('image/png')
+  })
+
+  it('rejects everything else', () => {
+    expect(normalizeCoverMime('text/html')).toBeNull()
+    expect(normalizeCoverMime('application/octet-stream')).toBeNull()
+    expect(normalizeCoverMime('')).toBeNull()
+    expect(normalizeCoverMime('image/svg+xml')).toBeNull()
   })
 })
 

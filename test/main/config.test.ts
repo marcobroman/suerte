@@ -1,4 +1,4 @@
-﻿import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+﻿import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -159,10 +159,17 @@ describe('config', () => {
     expect(await readFile(configPath(dir), 'utf8')).not.toContain('discogsToken')
   })
 
+  it.runIf(process.platform !== 'win32')('locks the config file to owner-only', async () => {
+    await saveConfig(dir, { roots: ['/music'] })
+
+    const { mode } = await stat(configPath(dir))
+    expect(mode & 0o777).toBe(0o600)
+  })
+
   it('round-trips a server section', async () => {
     await saveConfig(dir, {
       roots: ['/music'],
-      server: { enabled: true, port: 5000, token: 's3cret', sessions: [], devices: [] }
+      server: { enabled: true, port: 5000, token: 's3cret', sessions: [], devices: [], allowInsecure: false }
     })
 
     expect((await loadConfig(dir)).server).toEqual({
@@ -170,7 +177,8 @@ describe('config', () => {
       port: 5000,
       token: 's3cret',
       sessions: [],
-      devices: []
+      devices: [],
+      allowInsecure: false
     })
   })
 
@@ -181,11 +189,12 @@ describe('config', () => {
         enabled: true,
         port: 5000,
         token: 's3cret',
-        sessions: [{ id: 'a1', createdAt: 123 }],
-        devices: [{ token: 'd1', name: 'Phone', createdAt: 10, lastSeen: 20 }]
+        sessions: [{ id: 'a1', createdAt: 123, lastSeen: 124 }],
+        devices: [{ token: 'd1', name: 'Phone', createdAt: 10, lastSeen: 20 }],
+        allowInsecure: true
       }
     })
-    expect((await loadConfig(dir)).server?.sessions).toEqual([{ id: 'a1', createdAt: 123 }])
+    expect((await loadConfig(dir)).server?.sessions).toEqual([{ id: 'a1', createdAt: 123, lastSeen: 124 }])
     expect((await loadConfig(dir)).server?.devices).toEqual([
       { token: 'd1', name: 'Phone', createdAt: 10, lastSeen: 20 }
     ])
@@ -210,7 +219,9 @@ describe('config', () => {
       }),
       'utf8'
     )
-    expect((await loadConfig(dir)).server?.sessions).toEqual([{ id: 'ok', createdAt: 7 }])
+    // Entries predating lastSeen backfill it from creation instead of
+    // dropping: the upgrade itself must log nobody out.
+    expect((await loadConfig(dir)).server?.sessions).toEqual([{ id: 'ok', createdAt: 7, lastSeen: 7 }])
   })
 
   it('round-trips devices and drops malformed ones', async () => {
@@ -253,8 +264,16 @@ describe('config', () => {
       port: DEFAULT_SERVER_PORT,
       token: 's3cret',
       sessions: [],
-      devices: []
+      devices: [],
+      allowInsecure: false
     })
+
+    await writeFile(
+      configPath(dir),
+      JSON.stringify({ version: 1, roots: [], server: { enabled: true, allowInsecure: 1 } }),
+      'utf8'
+    )
+    expect((await loadConfig(dir)).server?.allowInsecure).toBe(false)
 
     await writeFile(configPath(dir), JSON.stringify({ version: 1, roots: [] }), 'utf8')
     expect((await loadConfig(dir)).server).toBeUndefined()

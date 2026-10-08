@@ -1,5 +1,6 @@
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { X509Certificate } from 'node:crypto'
+import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import selfsigned from 'selfsigned'
 
@@ -31,8 +32,53 @@ function describe(pem: string): { fingerprint: string; expiresAt: number } {
 }
 
 /**
- * Loads the server certificate, generating and persisting one on first use
- * (or when `regenerate` is set, or the stored files are unreadable/corrupt).
+ * Non-loopback IPv4 addresses of this machine — the home LAN address plus
+ * the tailnet address when Tailscale runs. Baked into the certificate so a
+ * phone reaching any of them gets a name-matched (if still self-signed)
+ * identity.
+ */
+export function localIPv4s(): string[] {
+  const found: string[] = []
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (address.family === 'IPv4' && !address.internal && !found.includes(address.address)) {
+        found.push(address.address)
+      }
+    }
+  }
+  return found
+}
+
+/**
+ * IP entries of a certificate's subjectAltName, or null when the PEM does
+ * not parse. Used to notice network changes (new DHCP/tailnet address) so
+ * the identity can be renewed to cover them.
+ */
+export function certIpSans(pem: string): string[] | null {
+  try {
+    const sans = new X509Certificate(pem).subjectAltName
+    if (!sans) return []
+    const ips: string[] = []
+    for (const part of sans.split(', ')) {
+      if (part.startsWith('IP Address:')) ips.push(part.slice('IP Address:'.length))
+    }
+    return ips
+  } catch {
+    return null
+  }
+}
+
+/** True when the certificate names every given IP in its subjectAltName. */
+export function certCoversIps(pem: string, ips: readonly string[]): boolean {
+  const covered = certIpSans(pem)
+  return covered !== null && ips.every((ip) => covered.includes(ip))
+}
+
+/**
+ * Loads the server certificate, generating and persisting one on first use —
+ * or when `regenerate` is set, the stored files are unreadable/corrupt, or
+ * the machine's addresses outgrew the certificate (new DHCP lease, Tailscale
+ * login). Renewal mints a new fingerprint, which phones confirm once.
  * The key file gets owner-only permissions where the platform supports it;
  * on Windows the ACL step is a best-effort no-op that never fails the call.
  */
@@ -48,9 +94,13 @@ export async function ensureServerCert(directory: string, regenerate = false): P
       const info = describe(cert)
       // An unreadable key is equally fatal, so require a plausible PEM body.
       if (!key.includes('PRIVATE KEY')) throw new Error('unusable key file')
+      const current = localIPv4s()
+      if (!certCoversIps(cert, current)) {
+        throw new Error('network addresses changed')
+      }
       return { cert, key, fingerprint: info.fingerprint, expiresAt: info.expiresAt }
     } catch {
-      // Missing or corrupt: fall through and mint a fresh identity below.
+      // Missing, corrupt, or stale: fall through and mint a fresh identity.
     }
   }
   let generated: { cert: string; private: string }
@@ -66,7 +116,8 @@ export async function ensureServerCert(directory: string, regenerate = false): P
           name: 'subjectAltName',
           altNames: [
             { type: 2, value: 'localhost' },
-            { type: 7, ip: '127.0.0.1' }
+            { type: 7, ip: '127.0.0.1' },
+            ...localIPv4s().map((ip) => ({ type: 7 as const, ip }))
           ]
         }
       ]

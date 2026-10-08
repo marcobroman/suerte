@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   HttpBackend,
+  clearServerCredentials,
   describeServerUrl,
   exchangePairingCode,
+  fingerprintFromHash,
   loadServerCredentials,
+  LoggedOutError,
   pairFromHash,
   phoneEntryUrl,
   phonePairUrl,
@@ -32,7 +35,10 @@ class FakeEventSource {
   }
 }
 
-function stubStorage(): { store: Map<string, string>; storage: KeyValueStorage } {
+function stubStorage(): {
+  store: Map<string, string>
+  storage: KeyValueStorage & { removeItem(key: string): void }
+} {
   const store = new Map<string, string>()
   return {
     store,
@@ -40,6 +46,9 @@ function stubStorage(): { store: Map<string, string>; storage: KeyValueStorage }
       getItem: (key: string): string | null => store.get(key) ?? null,
       setItem: (key: string, value: string): void => {
         store.set(key, String(value))
+      },
+      removeItem: (key: string): void => {
+        store.delete(key)
       }
     }
   }
@@ -141,6 +150,7 @@ describe('HttpBackend', () => {
     expect(await backend.readCover('abc')).toBe('https://phone:4280/api/cover?id=abc')
     vi.stubGlobal('EventSource', FakeEventSource)
     backend.onLibraryChanged(() => {})
+    await new Promise((resolve) => setTimeout(resolve, 0))
     expect(FakeEventSource.instances[0]?.url).toBe('https://phone:4280/api/events')
   })
 
@@ -183,10 +193,10 @@ describe('HttpBackend', () => {
     const unsubscribe = backend.onLibraryChanged((summary) => {
       seen.push(summary)
     })
+    // The subscription waits for login first.
+    await new Promise((resolve) => setTimeout(resolve, 0))
     expect(FakeEventSource.instances).toHaveLength(1)
-    expect(FakeEventSource.instances[0]?.url).toBe(
-      'https://phone:4280/api/events?token=tok'
-    )
+    expect(FakeEventSource.instances[0]?.url).toBe('https://phone:4280/api/events')
 
     FakeEventSource.instances[0]?.emit('{"trackCount":5,"scanning":false}')
     FakeEventSource.instances[0]?.emit('not json{{{')
@@ -195,6 +205,108 @@ describe('HttpBackend', () => {
 
     unsubscribe()
     expect(FakeEventSource.instances[0]?.closed).toBe(true)
+  })
+
+  it('does not subscribe when login fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'x' }, 401)))
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const backend = makeBackend()
+
+    backend.onLibraryChanged(() => {})
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(FakeEventSource.instances).toHaveLength(0)
+  })
+
+  it('silently re-logs-in when the cookie died server-side', async () => {
+    const calls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        calls.push(url)
+        if (url.endsWith('/api/session')) return jsonResponse({ ok: true })
+        if (calls.filter((call) => call.endsWith('/api/library')).length === 1) {
+          return jsonResponse({ error: 'stale cookie' }, 401)
+        }
+        return jsonResponse({
+          trackCount: 1,
+          tree: { artists: [], albums: [] },
+          tracks: [],
+          scanning: false
+        })
+      })
+    )
+    const backend = makeBackend()
+
+    const library = await backend.getLibrary()
+
+    expect(library).toMatchObject({ trackCount: 1 })
+    // Handshake, failed call, handshake again, replayed call.
+    expect(calls).toEqual([
+      'https://phone:4280/api/session',
+      'https://phone:4280/api/library',
+      'https://phone:4280/api/session',
+      'https://phone:4280/api/library'
+    ])
+  })
+
+  it('keeps a first-login failure a plain error, not a logout', async () => {
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (typeof url === 'string' && url.endsWith('/api/session')) {
+        return jsonResponse({ error: 'revoked' }, 401)
+      }
+      return jsonResponse({ trackCount: 1 })
+    })
+    const backend = makeBackend()
+
+    const error = await backend.getLibrary().catch((cause: unknown) => cause)
+    expect(error).not.toBeInstanceOf(LoggedOutError)
+    expect(String(error)).toContain('401')
+  })
+
+  it('surfaces logout when a re-login after a stale cookie is rejected', async () => {
+    let sessions = 0
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (typeof url === 'string' && url.endsWith('/api/session')) {
+        sessions += 1
+        return sessions === 1 ? jsonResponse({ ok: true }) : jsonResponse({ error: 'revoked' }, 401)
+      }
+      return jsonResponse({ error: 'stale' }, 401)
+    })
+    const backend = makeBackend()
+
+    await expect(backend.getLibrary()).rejects.toBeInstanceOf(LoggedOutError)
+    expect(sessions).toBe(2)
+  })
+
+  it('surfaces logout when the replayed call still 401s', async () => {
+    let libraries = 0
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (typeof url === 'string' && url.endsWith('/api/session')) return jsonResponse({ ok: true })
+      libraries += 1
+      return jsonResponse({ error: 'gone' }, 401)
+    })
+    const backend = makeBackend()
+
+    await expect(backend.getLibrary()).rejects.toBeInstanceOf(LoggedOutError)
+    expect(libraries).toBe(2)
+  })
+
+  it('logs out through the endpoint and forgets stored credentials', async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: { method?: string }) => jsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const { store, storage } = stubStorage()
+    saveServerCredentials(storage, { baseUrl: 'https://phone:4280', token: 'tok' })
+    const backend = new HttpBackend('https://phone:4280/', 'tok', storage)
+
+    await backend.logout()
+
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('https://phone:4280/api/logout')
+    expect(fetchImpl.mock.calls[0]?.[1]).toMatchObject({ method: 'POST' })
+    clearServerCredentials(storage)
+    expect(loadServerCredentials(storage)).toBeNull()
+    expect(store.has('onda.phone.server')).toBe(false)
   })
 
   it('keeps theme and EQ per device in local storage', async () => {
@@ -269,6 +381,31 @@ describe('phonePairUrl', () => {
     expect(url.startsWith('https://phone:4280/')).toBe(true)
     expect(url).not.toContain('?token=')
     expect(url).toContain('#pair=')
+  })
+
+  it('appends the fingerprint for trust-on-first-use when given', () => {
+    const fp = 'AA:BB:CC'
+    const pair = phonePairUrl('https://phone:4280/', 'AB3DF9K2Q', fp)
+    const entry = phoneEntryUrl('https://phone:4280/', 'tok', fp)
+
+    expect(pair).toContain(`#pair=AB3DF9K2Q&fp=${encodeURIComponent(fp)}`)
+    expect(entry).toContain(`#t=tok&fp=${encodeURIComponent(fp)}`)
+    expect(fingerprintFromHash(new URL(pair).hash)).toBe(fp)
+    expect(fingerprintFromHash(new URL(entry).hash)).toBe(fp)
+  })
+})
+
+describe('fingerprintFromHash', () => {
+  it('reads the fingerprint back out', () => {
+    expect(fingerprintFromHash('#pair=AB3&fp=AA%3ABB')).toBe('AA:BB')
+    expect(fingerprintFromHash('#t=abc&fp=XYZ')).toBe('XYZ')
+  })
+
+  it('rejects empties and garbage', () => {
+    expect(fingerprintFromHash('')).toBeNull()
+    expect(fingerprintFromHash('#fp=')).toBeNull()
+    expect(fingerprintFromHash('#pair=AB3')).toBeNull()
+    expect(fingerprintFromHash('#fp=%ZZ')).toBeNull()
   })
 })
 

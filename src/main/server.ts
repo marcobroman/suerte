@@ -1,5 +1,5 @@
 import { createReadStream, promises as fs } from 'node:fs'
-import { createHash, randomBytes, X509Certificate } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual, X509Certificate } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https'
 import { networkInterfaces } from 'node:os'
@@ -7,6 +7,7 @@ import { isAbsolute, normalize, relative, resolve, sep } from 'node:path'
 import type { LibrarySummary, PublicLibrarySummary } from '@shared/ipc'
 import type { DeviceInfo, DeviceRecord, ServerSession, Track } from '@shared/types'
 import { extensionOf } from '@shared/audio-files'
+import { ALLOWED_COVER_MIME } from './library/covers'
 
 export interface LibraryServerDeps {
   /** Read live so port changes apply without rebuilding the server. */
@@ -107,6 +108,21 @@ export function lanBaseUrls(port: number, secure = false): string[] {
   return urls
 }
 
+export type ServerTransport = 'https' | 'http' | 'disabled'
+
+/**
+ * Fail closed: without a certificate the server only listens with explicit
+ * user opt-in (`allowInsecure`). Callers gate `start()` on this — the server
+ * itself still serves whatever identity it is given.
+ */
+export function selectServerTransport(
+  tls: { cert: string; key: string } | null,
+  allowInsecure: boolean
+): ServerTransport {
+  if (tls) return 'https'
+  return allowInsecure ? 'http' : 'disabled'
+}
+
 /**
  * True when the requested path is a library root itself or lives under one.
  * relative() collapses `..` lexically, so anything escaping a root starts
@@ -155,6 +171,48 @@ export function clientPathIn(clientDir: string, requestPath: string): string | n
   if (resolved !== base && !resolved.startsWith(`${base}${sep}`)) return null
   return resolved
 }
+
+/**
+ * Handshake endpoints (`/api/session`, `/api/pair`) accept secrets, so they
+ * get a per-IP token bucket: 10 attempts per minute, then 429. The secrets
+ * themselves are unguessable (256-bit tokens, 45-bit single-use codes), so
+ * this is a backstop against scripting and socket-hoarding, not the primary
+ * defense. State lives per server instance and resets on restart.
+ */
+const RATE_LIMIT_MAX = 10
+const RATE_LIMIT_WINDOW_MS = 60_000
+
+function handshakeAllowed(
+  seen: Map<string, { count: number; resetAt: number }>,
+  request: IncomingMessage,
+  now: number = Date.now()
+): { ok: true } | { ok: false; retryAfterSec: number } {
+  const ip = request.socket.remoteAddress ?? 'unknown'
+  if (seen.size > 1024) {
+    for (const [key, entry] of seen) {
+      if (now >= entry.resetAt) seen.delete(key)
+    }
+  }
+  const entry = seen.get(ip)
+  if (!entry || now >= entry.resetAt) {
+    seen.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS })
+    return { ok: true }
+  }
+  entry.count += 1
+  if (entry.count > RATE_LIMIT_MAX) {
+    return { ok: false, retryAfterSec: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)) }
+  }
+  return { ok: true }
+}
+
+/** Slowloris guard: headers must arrive promptly; bodies stream without a cap (media). */
+const HEADERS_TIMEOUT_MS = 10_000
+/** Upper bound on request headers; the API needs a handful. */
+const MAX_HEADER_COUNT = 100
+/** Live event subscribers; beyond this the server answers 503. */
+const MAX_EVENT_SUBSCRIBERS = 20
+/** SSE keepalive: NATs and proxies drop idle sockets the client cannot see. */
+const EVENT_HEARTBEAT_MS = 25_000
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)
@@ -219,15 +277,48 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
   // Opaque id → real path, rebuilt only when the track list itself is replaced
   // (i.e. on rescan); lookups in between are map hits.
   let idCache: { tracks: readonly Track[]; byId: Map<string, string> } | null = null
-  // Issued session id → creation time. Seeded from persisted config at
-  // startup; every issue persists, so restarts keep phones logged in.
-  const sessions = new Map<string, number>(
-    deps.getSessions().map((session) => [session.id, session.createdAt])
+  // Issued session id → record. Seeded from persisted config at startup;
+  // every issue persists, so restarts keep phones logged in. Expired entries
+  // die lazily on use (plus a sweep on issue) and persist throttled.
+  const sessions = new Map<string, { createdAt: number; lastSeen: number }>(
+    deps.getSessions().map((session) => [session.id, { createdAt: session.createdAt, lastSeen: session.lastSeen }])
   )
+  let sessionsDirty = false
+  let lastSessionsPersist = 0
 
   async function persistSessions(): Promise<void> {
-    const rows: ServerSession[] = [...sessions].map(([id, createdAt]) => ({ id, createdAt }))
+    lastSessionsPersist = Date.now()
+    const rows: ServerSession[] = [...sessions].map(([id, record]) => ({
+      id,
+      createdAt: record.createdAt,
+      lastSeen: record.lastSeen
+    }))
     await deps.saveSessions(rows)
+  }
+
+  /**
+   * Writes dirty session/device stores, throttled so routine activity does
+   * not rewrite the config file on every request. Bookkeeping must never
+   * fail a media request, so persistence failures are swallowed here.
+   */
+  async function flushDirtyStores(): Promise<void> {
+    const now = Date.now()
+    if (sessionsDirty && now - lastSessionsPersist > 60 * 1000) {
+      sessionsDirty = false
+      try {
+        await persistSessions()
+      } catch {
+        // Best effort, as above.
+      }
+    }
+    if (devicesDirty && now - lastDevicesPersist > 60 * 1000) {
+      devicesDirty = false
+      try {
+        await persistDevices()
+      } catch {
+        // Best effort, as above.
+      }
+    }
   }
 
   // Device token → record. Seeded from persisted config; membership changes
@@ -244,6 +335,7 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
     deps.getDevices().map((device) => [device.token, { ...device }])
   )
   let lastDevicesPersist = 0
+  let devicesDirty = false
 
   async function persistDevices(): Promise<void> {
     lastDevicesPersist = Date.now()
@@ -253,6 +345,10 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
   // Outstanding pairing codes → creation time. In-memory only: a restart
   // invalidates a displayed QR, and the desktop simply mints a fresh one.
   const pairings = new Map<string, number>()
+  // Handshake attempts per IP for the token bucket above. Never persisted.
+  const handshakeAttempts = new Map<string, { count: number; resetAt: number }>()
+  // SSE keepalive timer; owned by start()/stop() like the socket itself.
+  let heartbeat: NodeJS.Timeout | null = null
 
   /** Opaque device id for the settings UI: identifies for revoke, useless for login. */
   function deviceId(token: string): string {
@@ -313,7 +409,50 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
   }
 
 /** Which credential authorized a request; null when none did. */
-type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; token: string } | null
+type AuthResult = { kind: 'master' } | { kind: 'session'; id: string } | { kind: 'device'; token: string } | null
+
+/**
+ * Lifetimes: sessions die 30 days after issue no matter what, or after 7
+ * idle days; devices die after 90 idle days with no absolute cap (re-pairing
+ * is user-visible friction, rotation covers emergencies). Abandoned phones
+ * fall off by themselves; active ones never notice.
+ */
+const SESSION_ABSOLUTE_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const SESSION_IDLE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const DEVICE_IDLE_TTL_MS = 90 * 24 * 60 * 60 * 1000
+
+function sessionAlive(session: { createdAt: number; lastSeen: number }, now: number): boolean {
+  return now - session.createdAt <= SESSION_ABSOLUTE_TTL_MS && now - session.lastSeen <= SESSION_IDLE_TTL_MS
+}
+
+function deviceAlive(record: { lastSeen: number }, now: number): boolean {
+  return now - record.lastSeen <= DEVICE_IDLE_TTL_MS
+}
+
+/**
+ * Constant-time string compare for secrets. Map lookups stay hash-based;
+ * the bearer secret — the one an oracle could target — gets no shortcut.
+ */
+function secretsEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8')
+  const right = Buffer.from(b, 'utf8')
+  return left.length === right.length && timingSafeEqual(left, right)
+}
+  /**
+   * Returns the live device record for a presented token, or null. Expired
+   * records are deleted on sight (persisted throttled), so a phone idle past
+   * its window is logged out the next time it knocks.
+   */
+  function takeLiveDevice(token: string, now: number): StoredDevice | null {
+    const record = devices.get(token)
+    if (!record) return null
+    if (!deviceAlive(record, now)) {
+      devices.delete(token)
+      devicesDirty = true
+      return null
+    }
+    return record
+  }
 
   function authorized(request: IncomingMessage, url: URL): AuthResult {
     const token = deps.getToken()
@@ -327,13 +466,24 @@ type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; t
       // it never lands in logs, history, or referrers, and <audio>/<img>/
       // EventSource send it automatically on same-origin requests.
       const sessionId = sessionIdOf(request)
-      return sessionId && sessions.has(sessionId) ? { kind: 'session' } : null
+      if (sessionId) {
+        const session = sessions.get(sessionId)
+        if (session) {
+          if (!sessionAlive(session, Date.now())) {
+            sessions.delete(sessionId)
+            sessionsDirty = true
+            return null
+          }
+          return { kind: 'session', id: sessionId }
+        }
+      }
+      return null
     }
-    if (presented === token) return { kind: 'master' }
+    if (secretsEqual(presented, token)) return { kind: 'master' }
     // <audio> and <img> tags cannot set headers, so media URLs carry the
     // credential instead — a device token works there exactly like the master.
-    if (devices.has(presented)) return { kind: 'device', token: presented }
-    return null
+    const record = takeLiveDevice(presented, Date.now())
+    return record ? { kind: 'device', token: presented } : null
   }
 
   /**
@@ -361,18 +511,41 @@ type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; t
     const credential = presented ?? bodyToken
     // The master token logs in, and so does any paired device token — a phone
     // that paired yesterday must be able to open a session with the only
-    // credential it kept.
-    const known = token !== undefined && (credential === token || (credential !== null && devices.has(credential)))
+    // credential it kept. An idle-expired device cannot mint sessions.
+    const known =
+      token !== undefined &&
+      credential !== null &&
+      (secretsEqual(credential, token) || takeLiveDevice(credential, Date.now()) !== null)
     if (!token || !known) {
       json(response, 401, { error: 'unauthorized' })
       return
     }
+    // Reap expired sessions with the issue so the store cannot grow stale
+    // entries without bound; the persist below writes the swept set.
+    const now = Date.now()
+    for (const [id, session] of sessions) {
+      if (!sessionAlive(session, now)) sessions.delete(id)
+    }
+    sessionsDirty = false
     const id = randomBytes(32).toString('hex')
-    sessions.set(id, Date.now())
+    sessions.set(id, { createdAt: now, lastSeen: now })
     await persistSessions()
+    // An expired device knocking above was just reaped in memory; write that
+    // through now rather than leaving the corpse in config.
+    if (devicesDirty) {
+      devicesDirty = false
+      try {
+        await persistDevices()
+      } catch {
+        // Best effort: the in-memory delete is what authorizes.
+      }
+    }
+    // `Secure` only when the transport is TLS — plain HTTP cannot set it,
+    // and a cookie without it never leaves a secure origin anyway.
+    const cookieSecure = deps.getTls() ? '; Secure' : ''
     response.writeHead(200, {
       'content-type': 'application/json; charset=utf-8',
-      'set-cookie': `${SESSION_COOKIE}=${id}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${SESSION_MAX_AGE}`
+      'set-cookie': `${SESSION_COOKIE}=${id}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${SESSION_MAX_AGE}${cookieSecure}`
     })
     response.end(JSON.stringify({ ok: true }))
   }
@@ -436,7 +609,7 @@ type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; t
         'content-length': size,
         'accept-ranges': 'bytes'
       })
-      createReadStream(path).pipe(response)
+      pipeFile(path, null, request, response)
       return
     }
 
@@ -478,18 +651,50 @@ type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; t
       'content-length': end - start + 1,
       'accept-ranges': 'bytes'
     })
-    createReadStream(path, { start, end }).pipe(response)
+    pipeFile(path, { start, end }, request, response)
+  }
+
+  /**
+   * Pipes a file to the response without letting filesystem races crash the
+   * main process: a file deleted or locked mid-stream ends the response
+   * instead of throwing uncaught, and a dropped client destroys the stream
+   * instead of leaking its handle.
+   */
+  function pipeFile(
+    path: string,
+    options: { start: number; end: number } | null,
+    request: IncomingMessage,
+    response: ServerResponse
+  ): void {
+    const stream = options ? createReadStream(path, options) : createReadStream(path)
+    stream.on('error', () => {
+      if (!response.headersSent) json(response, 500, { error: 'stream failed' })
+      else response.end()
+    })
+    request.on('close', () => stream.destroy())
+    stream.pipe(response)
   }
 
   async function serveCover(path: string, response: ServerResponse): Promise<void> {
     const dataUrl = await deps.readCover(path)
     const parsed = dataUrl ? /^data:([^;,]+);base64,(.*)$/s.exec(dataUrl) : null
-    if (!parsed?.[1] || !parsed[2]) {
+    // Defense in depth: extraction already filters, but a hostile MIME must
+    // never reach the wire even if a future reader is lax. Non-images 404.
+    const mime = parsed?.[1]?.toLowerCase().trim() ?? ''
+    if (!parsed?.[2] || !ALLOWED_COVER_MIME.has(mime)) {
       json(response, 404, { error: 'no cover art' })
       return
     }
     const bytes = Buffer.from(parsed[2], 'base64')
-    response.writeHead(200, { 'content-type': parsed[1], 'content-length': bytes.length })
+    response.writeHead(200, {
+      'content-type': mime,
+      'content-length': bytes.length,
+      // Even an allowed image must not sniff or script: a direct navigation
+      // to this URL renders in server origin.
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'",
+      'referrer-policy': 'no-referrer'
+    })
     response.end(bytes)
   }
 
@@ -509,7 +714,7 @@ type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; t
         if (!stats.isFile()) throw new Error('not a file')
         headers['content-length'] = String(stats.size)
         response.writeHead(200, headers)
-        createReadStream(file).pipe(response)
+        pipeFile(file, null, request, response)
       } catch {
         json(response, 404, { error: 'not found' })
       }
@@ -544,11 +749,58 @@ type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; t
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost')
+    // Pinned before any routing: tampering with transport security must not
+    // depend on which endpoint answers.
+    if (deps.getTls()) {
+      response.setHeader('strict-transport-security', 'max-age=31536000')
+    }
+    response.setHeader('x-content-type-options', 'nosniff')
+    response.setHeader('referrer-policy', 'no-referrer')
+    response.setHeader('cross-origin-resource-policy', 'same-origin')
+    // Logout revokes its own credential, so it authenticates inline here
+    // rather than behind the GET-only gate below. A session dies with its
+    // cookie, a device dies entirely; the master token has no per-login
+    // state (rotating it is its logout), so it just clears the cookie.
+    if (url.pathname === '/api/logout') {
+      if (request.method !== 'POST') {
+        json(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const auth = authorized(request, url)
+      if (!auth) {
+        json(response, 401, { error: 'unauthorized' })
+        return
+      }
+      try {
+        if (auth.kind === 'session') {
+          sessions.delete(auth.id)
+          await persistSessions()
+        } else if (auth.kind === 'device') {
+          devices.delete(auth.token)
+          await persistDevices()
+        }
+      } catch {
+        // The cookie clearing below still logs the browser out; the
+        // in-memory deletes are what authorize.
+      }
+      response.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'set-cookie': `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0`
+      })
+      response.end(JSON.stringify({ ok: true }))
+      return
+    }
     // The session handshake is the only POST: it must come before the
     // GET-only gate below, and it answers 405 to anything else.
     if (url.pathname === '/api/session') {
       if (request.method !== 'POST') {
         json(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const sessionLimit = handshakeAllowed(handshakeAttempts, request)
+      if (!sessionLimit.ok) {
+        response.setHeader('retry-after', String(sessionLimit.retryAfterSec))
+        json(response, 429, { error: 'too many attempts' })
         return
       }
       try {
@@ -564,6 +816,12 @@ type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; t
     if (url.pathname === '/api/pair') {
       if (request.method !== 'POST') {
         json(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const pairLimit = handshakeAllowed(handshakeAttempts, request)
+      if (!pairLimit.ok) {
+        response.setHeader('retry-after', String(pairLimit.retryAfterSec))
+        json(response, 429, { error: 'too many attempts' })
         return
       }
       try {
@@ -594,29 +852,35 @@ type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; t
       json(response, 401, { error: 'unauthorized' })
       return
     }
+    // Fresh activity slides both idle windows, persisted throttled so
+    // routine requests do not rewrite the config file every time. Records
+    // were liveness-checked in authorized(), so the lookups cannot miss.
     if (auth.kind === 'device') {
-      // Fresh activity for the settings list, persisted throttled so routine
-      // requests do not rewrite the config file every time.
       const record = devices.get(auth.token)
-      if (!record) {
-        json(response, 401, { error: 'unauthorized' })
-        return
-      }
-      record.lastSeen = Date.now()
-      if (Date.now() - lastDevicesPersist > 60 * 1000) {
-        try {
-          await persistDevices()
-        } catch {
-          // Activity bookkeeping must never fail a media request.
-        }
+      if (record) {
+        record.lastSeen = Date.now()
+        devicesDirty = true
       }
     }
+    if (auth.kind === 'session') {
+      const session = sessions.get(auth.id)
+      if (session) {
+        session.lastSeen = Date.now()
+        sessionsDirty = true
+      }
+    }
+    await flushDirtyStores()
 
     if (url.pathname === '/api/library') {
       json(response, 200, publicSummary())
       return
     }
     if (url.pathname === '/api/events') {
+      // Bounded subscribers: an unbounded Set lets one peer hoard sockets.
+      if (events.size >= MAX_EVENT_SUBSCRIBERS) {
+        json(response, 503, { error: 'too many subscribers' })
+        return
+      }
       response.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-cache',
@@ -636,15 +900,34 @@ type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; t
         return
       }
       // Opaque ids cannot traverse by construction; the resolved real path is
-      // still containment-checked as defense in depth.
+      // still containment-checked as defense in depth — twice: lexically,
+      // then canonically, so a symlink planted in the library cannot smuggle
+      // an outside file past the check (TOCTOU included: the canonical path
+      // is what actually gets served).
       const real = resolveTrackId(id)
       if (!real || !insideRoots(deps.getRoots(), real)) {
         json(response, 404, { error: 'not found' })
         return
       }
+      let canonical: string
       try {
-        if (url.pathname === '/api/cover') await serveCover(real, response)
-        else await serveStream(real, request, response)
+        canonical = await fs.realpath(real)
+        const canonicalRoots: string[] = []
+        for (const root of deps.getRoots()) {
+          try {
+            canonicalRoots.push(await fs.realpath(root))
+          } catch {
+            // Unreachable roots cannot contain anything right now.
+          }
+        }
+        if (!insideRoots(canonicalRoots, canonical)) throw new Error('outside roots')
+      } catch {
+        json(response, 404, { error: 'not found' })
+        return
+      }
+      try {
+        if (url.pathname === '/api/cover') await serveCover(canonical, response)
+        else await serveStream(canonical, request, response)
       } catch {
         if (!response.headersSent) json(response, 500, { error: 'stream failed' })
         else response.end()
@@ -676,6 +959,24 @@ type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; t
         next.on('error', (error: unknown) => {
           reject(error instanceof Error ? error : new Error('server failed to start'))
         })
+        // Slowloris guard on the header phase; bodies stream uncapped (media).
+        // requestTimeout stays default: SSE responses never complete, and
+        // EventSource reconnects transparently if one is ever cut.
+        next.headersTimeout = HEADERS_TIMEOUT_MS
+        next.maxHeadersCount = MAX_HEADER_COUNT
+        // SSE keepalive: NATs silently drop idle sockets the client cannot
+        // see. Dead peers surface on the next failed write and are pruned.
+        if (heartbeat) clearInterval(heartbeat)
+        heartbeat = setInterval(() => {
+          for (const client of [...events]) {
+            try {
+              client.write(': ping\n\n')
+            } catch {
+              events.delete(client)
+            }
+          }
+        }, EVENT_HEARTBEAT_MS)
+        heartbeat.unref?.()
         next.listen(deps.getPort(), '0.0.0.0', () => {
           server = next
           listening = true
@@ -687,6 +988,10 @@ type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; t
     },
 
     stop(): Promise<void> {
+      if (heartbeat) {
+        clearInterval(heartbeat)
+        heartbeat = null
+      }
       for (const client of events) {
         try {
           client.end()

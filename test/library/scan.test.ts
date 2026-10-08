@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -44,6 +44,21 @@ describe('scanLibrary', () => {
 
     expect(outcome.tracks).toHaveLength(1)
     expect(outcome.tracks[0]?.path).toBe(join(root, 'a.wav'))
+  })
+
+  it('never indexes symlinks, even ones pointing at audio', async () => {
+    const target = await writeWav('real.wav')
+    try {
+      await symlink(target, join(root, 'link.wav'))
+    } catch {
+      // No symlink privilege on this machine (Windows without Developer
+      // Mode): the serve-time canonical check below still covers escapes.
+      return
+    }
+
+    const outcome = await scanLibrary({ roots: [root], cache: new LibraryCache() })
+
+    expect(outcome.tracks.map((track) => track.path)).toEqual([target])
   })
 
   it('descends into subdirectories', async () => {

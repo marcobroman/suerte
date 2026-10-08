@@ -1,8 +1,10 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { X509Certificate } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { ensureServerCert } from '@main/cert'
+import selfsigned from 'selfsigned'
+import { ensureServerCert, certCoversIps, certIpSans, localIPv4s } from '@main/cert'
 
 describe('ensureServerCert', () => {
   let dir = ''
@@ -49,5 +51,36 @@ describe('ensureServerCert', () => {
     const cert = await ensureServerCert(dir)
 
     expect(cert.fingerprint).toMatch(/^([0-9A-F]{2}:){31}[0-9A-F]{2}$/)
+  })
+
+  it('names localhost, loopback, and every local address in the SAN', async () => {
+    const cert = await ensureServerCert(dir)
+    const sans = certIpSans(cert.cert)
+
+    expect(sans).toEqual(expect.arrayContaining(['127.0.0.1', ...localIPv4s()]))
+    expect(certCoversIps(cert.cert, localIPv4s())).toBe(true)
+  })
+
+  it('detects uncovered addresses and unparseable input', async () => {
+    const cert = await ensureServerCert(dir)
+
+    expect(certCoversIps(cert.cert, [...localIPv4s(), '203.0.113.99'])).toBe(false)
+    expect(certCoversIps('not a certificate', ['127.0.0.1'])).toBe(false)
+    expect(certIpSans('not a certificate')).toBeNull()
+  })
+
+  it('renews a stored identity that no longer covers this machine', async () => {
+    if (localIPv4s().length === 0) return
+    const stale = await selfsigned.generate([{ name: 'commonName', value: 'Onda Server' }], {
+      keySize: 2048,
+      algorithm: 'sha256'
+    })
+    await writeFile(join(dir, 'server-cert.pem'), stale.cert, 'utf8')
+    await writeFile(join(dir, 'server-key.pem'), stale.private, 'utf8')
+
+    const renewed = await ensureServerCert(dir)
+
+    expect(renewed.fingerprint).not.toBe(new X509Certificate(stale.cert).fingerprint256)
+    expect(certCoversIps(renewed.cert, localIPv4s())).toBe(true)
   })
 })
