@@ -34,7 +34,15 @@ const api: IpcApi = {
     ipcRenderer.invoke(IPC.setServerPort, port) as Promise<AppSettings>,
   regenerateServerToken: () =>
     ipcRenderer.invoke(IPC.regenerateServerToken) as Promise<AppSettings>,
+  regenerateServerCert: () =>
+    ipcRenderer.invoke(IPC.regenerateServerCert) as Promise<AppSettings>,
   getServerToken: () => ipcRenderer.invoke(IPC.getServerToken) as Promise<string | null>,
+  getPairingCode: () =>
+    ipcRenderer.invoke(IPC.getPairingCode) as Promise<{ code: string; expiresAt: number } | null>,
+  burnPairingCode: (code: unknown) =>
+    ipcRenderer.invoke(IPC.burnPairingCode, code) as Promise<void>,
+  revokeServerDevice: (id: unknown) =>
+    ipcRenderer.invoke(IPC.revokeServerDevice, id) as Promise<AppSettings>,
   searchDiscogs: (query: unknown) =>
     ipcRenderer.invoke(IPC.searchDiscogs, query) as Promise<DiscogsSearchOutcome>,
   getDiscogsRelease: (id: unknown, kind: unknown) =>

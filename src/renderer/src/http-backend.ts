@@ -85,6 +85,77 @@ export function tokenFromHash(hash: string): string | null {
   }
 }
 
+/**
+ * Which network a server URL belongs to. Tailscale owns 100.64.0.0/10, so a
+ * matching IPv4 host is the tailnet door (reachable from anywhere);
+ * anything else is the home LAN (same Wi-Fi only).
+ */
+export type ServerUrlKind = 'tailscale' | 'lan'
+
+export function describeServerUrl(url: string): ServerUrlKind {
+  try {
+    const octets = new URL(url).hostname.split('.').map(Number)
+    if (
+      octets.length === 4 &&
+      octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255)
+    ) {
+      const [first, second] = [octets[0] ?? -1, octets[1] ?? -1]
+      if (first === 100 && second >= 64 && second <= 127) return 'tailscale'
+    }
+  } catch {
+    // Unparseable stays on the safe side: home LAN only.
+  }
+  return 'lan'
+}
+
+/**
+ * Pairing entry: the QR code and copy-link carry a single-use pairing code in
+ * the fragment (never the master token), which the phone trades for its own
+ * device token. Same fragment discipline as phoneEntryUrl.
+ */
+export function phonePairUrl(baseUrl: string, code: string): string {
+  return `${baseUrl.replace(/\/+$/, '')}/#pair=${encodeURIComponent(code)}`
+}
+
+/** Inverse of phonePairUrl for the boot screen; null when absent. */
+export function pairFromHash(hash: string): string | null {
+  const match = /(?:^|&)pair=([^&]*)/.exec(hash.startsWith('#') ? hash.slice(1) : hash)
+  if (!match?.[1]) return null
+  try {
+    const code = decodeURIComponent(match[1])
+    return code === '' ? null : code
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Redeems a pairing code for this device's own token. Called before any
+ * HttpBackend exists (the token is the credential it is built with), so it
+ * is a module function taking an explicit base URL. Throws on expired,
+ * consumed, or wrong codes — the message names the likely cause.
+ */
+export async function exchangePairingCode(baseUrl: string, code: string, name: string): Promise<string> {
+  const trimmedName = name.trim()
+  if (trimmedName === '') throw new Error('Name your device first.')
+  const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/pair`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code: code.trim(), name: trimmedName })
+  })
+  if (response.status === 401) {
+    throw new Error('That pairing code is expired or already used — generate a fresh one on the desktop.')
+  }
+  if (!response.ok) {
+    throw new Error(`Pairing failed (${response.status}).`)
+  }
+  const body = (await response.json()) as { token?: unknown }
+  if (typeof body.token !== 'string' || body.token === '') {
+    throw new Error('Pairing failed — the server answered without a token.')
+  }
+  return body.token
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     throw new Error(`Request failed (${response.status}).`)
@@ -95,8 +166,14 @@ async function readJson<T>(response: Response): Promise<T> {
 /**
  * Backend implementation that talks to the LAN server over HTTP. Covers are
  * same-origin endpoint URLs (the served page is same-origin, so they satisfy
- * the content-security policy); the <audio> and <img> tags this enables
- * cannot send headers, which is why those endpoints also accept ?token=.
+ * the content-security policy).
+ *
+ * Auth is cookie-first: the first API call trades the token (bearer header,
+ * never the URL) for an HttpOnly login cookie via POST /api/session, and
+ * from then on URLs carry no token at all — <audio>, <img>, and EventSource
+ * send the cookie automatically on same-origin requests. URLs built before
+ * the session exists keep ?token= as a graceful fallback; the server accepts
+ * either credential.
  *
  * Theme and EQ are per-device preferences kept in localStorage; everything
  * that touches the local filesystem, dialogs, or tagging rejects as
@@ -106,6 +183,8 @@ export class HttpBackend implements Backend {
   readonly #baseUrl: string
   readonly #token: string
   readonly #storage: KeyValueStorage
+  #sessionReady = false
+  #sessionFlight: Promise<void> | null = null
 
   constructor(baseUrl: string, token: string, storage: KeyValueStorage) {
     this.#baseUrl = baseUrl.replace(/\/+$/, '')
@@ -115,6 +194,39 @@ export class HttpBackend implements Backend {
 
   get baseUrl(): string {
     return this.#baseUrl
+  }
+
+  /**
+   * Logs in and stores the session cookie. Concurrent callers share one
+   * handshake; a failure clears the flight so the next call retries instead
+   * of caching a dead login. Throws when the token is wrong or the server
+   * is unreachable — callers fail loudly rather than silently falling back
+   * to tokens in URLs.
+   */
+  async startSession(): Promise<void> {
+    if (this.#sessionReady) return
+    if (!this.#sessionFlight) {
+      this.#sessionFlight = (async (): Promise<void> => {
+        await readJson(
+          await fetch(`${this.#baseUrl}/api/session`, {
+            method: 'POST',
+            headers: this.#headers()
+          })
+        )
+        this.#sessionReady = true
+      })()
+      // Clearing the flight must never surface as its own rejection: awaiters
+      // already observe the original promise, so both branches resolve here.
+      void this.#sessionFlight.then(
+        () => {
+          this.#sessionFlight = null
+        },
+        () => {
+          this.#sessionFlight = null
+        }
+      )
+    }
+    await this.#sessionFlight
   }
 
   /** Direct stream URL for the audio element, which cannot send headers. */
@@ -127,11 +239,16 @@ export class HttpBackend implements Backend {
   }
 
   #url(path: string, params: Record<string, string> = {}): string {
-    const query = new URLSearchParams({ ...params, token: this.#token }).toString()
-    return `${this.#baseUrl}${path}?${query}`
+    // Once logged in the cookie authenticates, so the token stays out of the
+    // URL entirely (logs, history, referrers). Before that, ?token= keeps
+    // media working — the server accepts either credential.
+    const effective = this.#sessionReady ? { ...params } : { ...params, token: this.#token }
+    const query = new URLSearchParams(effective).toString()
+    return query === '' ? `${this.#baseUrl}${path}` : `${this.#baseUrl}${path}?${query}`
   }
 
   async #get<T>(path: string, params: Record<string, string> = {}): Promise<T> {
+    await this.startSession()
     return readJson<T>(await fetch(this.#url(path, params), { headers: this.#headers() }))
   }
 
@@ -178,7 +295,14 @@ export class HttpBackend implements Backend {
         enabled: true,
         port: DEFAULT_SERVER_PORT,
         tokenSet: true,
-        url: this.#baseUrl
+        url: this.#baseUrl,
+        urls: [this.#baseUrl],
+        // The phone trusts at the platform level (system trust prompt on
+        // first connect); there is no fingerprint of its own to show.
+        secure: this.#baseUrl.startsWith('https:'),
+        fingerprint: null,
+        certExpiresAt: null,
+        devices: []
       }
     }
   }
@@ -219,7 +343,23 @@ export class HttpBackend implements Backend {
     throw unsupported('Server settings')
   }
 
+  async regenerateServerCert(): Promise<AppSettings> {
+    throw unsupported('Server settings')
+  }
+
   async getServerToken(): Promise<string | null> {
+    throw unsupported('Server settings')
+  }
+
+  async getPairingCode(): Promise<{ code: string; expiresAt: number } | null> {
+    throw unsupported('Server settings')
+  }
+
+  async burnPairingCode(): Promise<void> {
+    throw unsupported('Server settings')
+  }
+
+  async revokeServerDevice(): Promise<AppSettings> {
     throw unsupported('Server settings')
   }
 
@@ -261,8 +401,8 @@ export class HttpBackend implements Backend {
   }
 
   onLibraryChanged(callback: (summary: LibrarySummary) => void): () => void {
-    // EventSource cannot send headers, so the token travels in the query —
-    // the one place the server accepts it outside Authorization.
+    // EventSource cannot send headers, but same-origin requests carry the
+    // session cookie automatically. Before login ?token= is the fallback.
     const source = new EventSource(this.#url('/api/events'))
     source.onmessage = (event: MessageEvent) => {
       try {

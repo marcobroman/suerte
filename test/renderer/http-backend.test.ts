@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   HttpBackend,
+  describeServerUrl,
+  exchangePairingCode,
   loadServerCredentials,
+  pairFromHash,
   phoneEntryUrl,
+  phonePairUrl,
   saveServerCredentials,
   tokenFromHash,
   type KeyValueStorage
@@ -64,10 +68,15 @@ describe('HttpBackend', () => {
     vi.unstubAllGlobals()
   })
 
-  it('fetches the library with a bearer token', async () => {
+  it('logs in once, then calls the API without URL tokens', async () => {
     const fetchImpl = vi.fn(
       async (_url: string, _init?: { headers?: Record<string, string> }): Promise<Response> =>
-        jsonResponse({ trackCount: 3 })
+        jsonResponse({
+          trackCount: 3,
+          tree: { artists: [], albums: [] },
+          tracks: [],
+          scanning: false
+        })
     )
     vi.stubGlobal('fetch', fetchImpl)
     const backend = new HttpBackend('https://phone:4280/', 'tok', storage)
@@ -75,10 +84,64 @@ describe('HttpBackend', () => {
     const library = await backend.getLibrary()
 
     expect(library).toMatchObject({ trackCount: 3 })
-    expect(fetchImpl).toHaveBeenCalledOnce()
-    const call = fetchImpl.mock.calls[0]
-    expect(call?.[0]).toBe('https://phone:4280/api/library?token=tok')
-    expect(call?.[1]).toMatchObject({ headers: { Authorization: 'Bearer tok' } })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    const sessionCall = fetchImpl.mock.calls[0]
+    const apiCall = fetchImpl.mock.calls[1]
+    // The handshake carries the token in a header, never the URL.
+    expect(sessionCall?.[0]).toBe('https://phone:4280/api/session')
+    expect(sessionCall?.[1]).toMatchObject({
+      method: 'POST',
+      headers: { Authorization: 'Bearer tok' }
+    })
+    // From then on the cookie authenticates: no token in the URL.
+    expect(apiCall?.[0]).toBe('https://phone:4280/api/library')
+    expect(apiCall?.[1]).toMatchObject({ headers: { Authorization: 'Bearer tok' } })
+
+    // A second API call reuses the session — no new handshake.
+    await backend.getLibrary()
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    expect(fetchImpl.mock.calls[2]?.[0]).toBe('https://phone:4280/api/library')
+  })
+
+  it('shares one session handshake across concurrent calls', async () => {
+    let posts = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/api/session')) posts += 1
+        return jsonResponse({})
+      })
+    )
+    const backend = makeBackend()
+
+    await Promise.all([backend.startSession(), backend.startSession()])
+
+    expect(posts).toBe(1)
+  })
+
+  it('fails loudly when login is rejected', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'x' }, 401)))
+    const backend = makeBackend()
+
+    await expect(backend.startSession()).rejects.toThrow('401')
+    // No silent fallback to tokens in URLs: the API call never goes out.
+    await expect(backend.getLibrary()).rejects.toThrow('401')
+  })
+
+  it('drops tokens from media and event URLs once logged in', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: true })))
+    const backend = makeBackend()
+
+    // Before login the query token keeps media working (server accepts both).
+    expect(backend.streamUrl('abc')).toBe('https://phone:4280/api/stream?id=abc&token=tok')
+
+    await backend.startSession()
+
+    expect(backend.streamUrl('abc')).toBe('https://phone:4280/api/stream?id=abc')
+    expect(await backend.readCover('abc')).toBe('https://phone:4280/api/cover?id=abc')
+    vi.stubGlobal('EventSource', FakeEventSource)
+    backend.onLibraryChanged(() => {})
+    expect(FakeEventSource.instances[0]?.url).toBe('https://phone:4280/api/events')
   })
 
   it('throws on failed requests', async () => {
@@ -155,7 +218,10 @@ describe('HttpBackend', () => {
     expect((await backend.getSettings()).server).toMatchObject({
       enabled: true,
       tokenSet: true,
-      url: 'https://phone:4280'
+      url: 'https://phone:4280',
+      urls: ['https://phone:4280'],
+      secure: true,
+      fingerprint: null
     })
   })
 
@@ -193,6 +259,82 @@ describe('tokenFromHash', () => {
     expect(tokenFromHash('#t=')).toBeNull()
     expect(tokenFromHash('#other=1')).toBeNull()
     expect(tokenFromHash('#t=%ZZ')).toBeNull()
+  })
+})
+
+describe('phonePairUrl', () => {
+  it('carries the pairing code in the fragment, never the query', () => {
+    const url = phonePairUrl('https://phone:4280/', 'AB3DF9K2Q')
+
+    expect(url.startsWith('https://phone:4280/')).toBe(true)
+    expect(url).not.toContain('?token=')
+    expect(url).toContain('#pair=')
+  })
+})
+
+describe('pairFromHash', () => {
+  it('reads the pairing code back out', () => {
+    expect(pairFromHash('#pair=AB3DF9K2Q')).toBe('AB3DF9K2Q')
+    expect(pairFromHash('#t=abc&pair=XYZ')).toBe('XYZ')
+  })
+
+  it('rejects empties and garbage', () => {
+    expect(pairFromHash('')).toBeNull()
+    expect(pairFromHash('#pair=')).toBeNull()
+    expect(pairFromHash('#t=abc')).toBeNull()
+    expect(pairFromHash('#pair=%ZZ')).toBeNull()
+  })
+})
+
+describe('describeServerUrl', () => {
+  it('recognizes the tailnet range', () => {
+    expect(describeServerUrl('https://100.64.0.5:4280')).toBe('tailscale')
+    expect(describeServerUrl('http://100.127.255.1:4280')).toBe('tailscale')
+  })
+
+  it('treats everything else as home LAN', () => {
+    expect(describeServerUrl('http://192.168.1.5:4280')).toBe('lan')
+    expect(describeServerUrl('http://10.0.0.2:4280')).toBe('lan')
+    // Just outside the tailnet range on both sides.
+    expect(describeServerUrl('http://100.63.0.1:4280')).toBe('lan')
+    expect(describeServerUrl('http://100.128.0.1:4280')).toBe('lan')
+    expect(describeServerUrl('not a url')).toBe('lan')
+    expect(describeServerUrl('https://[::1]:4280')).toBe('lan')
+  })
+})
+
+describe('exchangePairingCode', () => {
+  it('posts the code and name, returning the device token', async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: { body?: string }) => {
+      expect(url).toBe('https://phone:4280/api/pair')
+      expect(JSON.parse(String(init?.body))).toEqual({ code: 'AB3DF9K2Q', name: 'Phone' })
+      return jsonResponse({ token: 'device-token' })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+
+    const token = await exchangePairingCode('https://phone:4280/', 'AB3DF9K2Q', '  Phone  ')
+
+    expect(token).toBe('device-token')
+    expect(fetchImpl).toHaveBeenCalledOnce()
+  })
+
+  it('explains expired codes and rejects blank names locally', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'unauthorized' }, 401)))
+
+    await expect(exchangePairingCode('https://phone:4280', 'USED', 'Phone')).rejects.toThrow(
+      /fresh one/
+    )
+    await expect(exchangePairingCode('https://phone:4280', 'CODE', '   ')).rejects.toThrow(
+      /device/i
+    )
+  })
+
+  it('rejects malformed server answers', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: true })))
+
+    await expect(exchangePairingCode('https://phone:4280', 'CODE', 'Phone')).rejects.toThrow(
+      /without a token/
+    )
   })
 })
 

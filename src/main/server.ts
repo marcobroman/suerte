@@ -1,21 +1,38 @@
 import { createReadStream, promises as fs } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes, X509Certificate } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https'
 import { networkInterfaces } from 'node:os'
 import { isAbsolute, normalize, relative, resolve, sep } from 'node:path'
 import type { LibrarySummary, PublicLibrarySummary } from '@shared/ipc'
-import type { Track } from '@shared/types'
+import type { DeviceInfo, DeviceRecord, ServerSession, Track } from '@shared/types'
 import { extensionOf } from '@shared/audio-files'
 
 export interface LibraryServerDeps {
   /** Read live so port changes apply without rebuilding the server. */
   getPort(): number
   getToken(): string | undefined
+  /** TLS identity; null means plain HTTP (tests, or cert generation failed). */
+  getTls(): { cert: string; key: string } | null
+  /** Sessions persisted in config, so phones stay logged in across restarts. */
+  getSessions(): readonly ServerSession[]
+  /** Called whenever a session is issued; the whole config is rewritten. */
+  saveSessions(sessions: readonly ServerSession[]): Promise<void>
+  /** Paired devices, persisted alongside sessions. */
+  getDevices(): readonly DeviceRecord[]
+  /** Called on pair, revoke, drop, and throttled last-seen updates. */
+  saveDevices(devices: readonly DeviceRecord[]): Promise<void>
   getSummary(): LibrarySummary
   readCover(path: string): Promise<string | null>
   getRoots(): readonly string[]
   /** Built renderer directory, or null when it was never built (dev mode). */
   getClientDir(): string | null
+}
+
+/** Short-lived single-use pairing code minted for the QR/link flow. */
+export interface PairingCode {
+  readonly code: string
+  readonly expiresAt: number
 }
 
 export interface LibraryServer {
@@ -25,6 +42,26 @@ export interface LibraryServer {
   stop(): Promise<void>
   /** Pushes the current summary to every SSE subscriber. */
   pushLibraryChanged(): void
+  /** Whether clients are served over TLS, with the live cert's identity. */
+  tlsStatus(): { secure: boolean; fingerprint: string | null; expiresAt: number | null }
+  /** Forgets every issued session (token rotation); persisted too. */
+  dropSessions(): Promise<void>
+  /**
+   * Mints a single-use pairing code. The code (not the master token) is what
+   * the QR and copy-link carry, so the secret never leaves the desktop.
+   */
+  issuePairingCode(): PairingCode
+  /** Paired devices for the desktop settings list. */
+  getDevices(): DeviceInfo[]
+  /** Revokes one device by its id; unknown ids report false. */
+  revokeDevice(id: string): Promise<boolean>
+  /**
+   * Invalidates one outstanding pairing code (desktop hid its QR). Unknown
+   * or already-consumed codes report false; both are safe no-ops.
+   */
+  burnPairingCode(code: string): boolean
+  /** Forgets every device and pending code (token rotation); persisted too. */
+  dropDevices(): Promise<void>
 }
 
 const AUDIO_MIME: Record<string, string> = {
@@ -47,15 +84,27 @@ const AUDIO_MIME: Record<string, string> = {
 }
 
 /** First LAN IPv4, for the "open this on your phone" display. Loopback excluded. */
-export function lanBaseUrl(port: number): string | null {
+export function lanBaseUrl(port: number, secure = false): string | null {
+  return lanBaseUrls(port, secure)[0] ?? null
+}
+
+/**
+ * Every reachable LAN IPv4 base URL (loopback excluded): typically the home
+ * LAN address plus the tailnet address when Tailscale runs. The desktop
+ * settings screen lists them all so remote pairing picks the right one.
+ */
+export function lanBaseUrls(port: number, secure = false): string[] {
+  const scheme = secure ? 'https' : 'http'
+  const urls: string[] = []
   for (const addresses of Object.values(networkInterfaces())) {
     for (const address of addresses ?? []) {
       if (address.family === 'IPv4' && !address.internal) {
-        return `http://${address.address}:${port}`
+        const url = `${scheme}://${address.address}:${port}`
+        if (!urls.includes(url)) urls.push(url)
       }
     }
   }
-  return null
+  return urls
 }
 
 /**
@@ -116,14 +165,117 @@ function json(response: ServerResponse, status: number, body: unknown): void {
   response.end(payload)
 }
 
+/** Login cookie name. HttpOnly so page JS can never steal it; SameSite=Strict
+ * so cross-site pages cannot ride it. (`Secure` arrives with TLS in Phase 3 —
+ * plain HTTP on the LAN cannot set it.) */
+const SESSION_COOKIE = 'onda_session'
+/** Browser keeps the login ~a year; the server itself never expires sessions. */
+const SESSION_MAX_AGE = 31536000
+/** Session handshake bodies are tiny JSON; anything bigger is abuse. */
+const SESSION_BODY_LIMIT = 4096
+
+/** Null unless the request carries a syntactically valid session id. */
+function sessionIdOf(request: IncomingMessage): string | null {
+  const header = request.headers.cookie
+  if (!header) return null
+  for (const part of header.split(';')) {
+    const trimmed = part.trim()
+    if (!trimmed.startsWith(`${SESSION_COOKIE}=`)) continue
+    const value = trimmed.slice(SESSION_COOKIE.length + 1).trim()
+    return value === '' ? null : value
+  }
+  return null
+}
+
+/** Reads a small request body, or null when it is missing, oversized, or unreadable. */
+function readBody(request: IncomingMessage, limit: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    let done = false
+    const finish = (body: string | null): void => {
+      if (done) return
+      done = true
+      resolve(body)
+    }
+    request.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > limit) {
+        finish(null)
+        return
+      }
+      chunks.push(chunk)
+    })
+    request.on('end', () => finish(Buffer.concat(chunks).toString('utf8')))
+    request.on('error', () => finish(null))
+  })
+}
+
 export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
-  let server: Server | null = null
+  let server: Server | HttpsServer | null = null
   let listening = false
   let boundPort = 0
   const events = new Set<ServerResponse>()
   // Opaque id → real path, rebuilt only when the track list itself is replaced
   // (i.e. on rescan); lookups in between are map hits.
   let idCache: { tracks: readonly Track[]; byId: Map<string, string> } | null = null
+  // Issued session id → creation time. Seeded from persisted config at
+  // startup; every issue persists, so restarts keep phones logged in.
+  const sessions = new Map<string, number>(
+    deps.getSessions().map((session) => [session.id, session.createdAt])
+  )
+
+  async function persistSessions(): Promise<void> {
+    const rows: ServerSession[] = [...sessions].map(([id, createdAt]) => ({ id, createdAt }))
+    await deps.saveSessions(rows)
+  }
+
+  // Device token → record. Seeded from persisted config; membership changes
+  // (pair, revoke, drop) persist immediately, while last-seen activity
+  // persists throttled so every request does not rewrite the config file.
+  // Mutable internally; snapshots go out through persistDevices/getDevices.
+  interface StoredDevice {
+    token: string
+    name: string
+    createdAt: number
+    lastSeen: number
+  }
+  const devices = new Map<string, StoredDevice>(
+    deps.getDevices().map((device) => [device.token, { ...device }])
+  )
+  let lastDevicesPersist = 0
+
+  async function persistDevices(): Promise<void> {
+    lastDevicesPersist = Date.now()
+    await deps.saveDevices([...devices.values()])
+  }
+
+  // Outstanding pairing codes → creation time. In-memory only: a restart
+  // invalidates a displayed QR, and the desktop simply mints a fresh one.
+  const pairings = new Map<string, number>()
+
+  /** Opaque device id for the settings UI: identifies for revoke, useless for login. */
+  function deviceId(token: string): string {
+    return createHash('sha256').update(token, 'utf8').digest('hex')
+  }
+
+  /** Pairing codes live 10 minutes and are typed by hand as a fallback, so the
+   * alphabet skips ambiguous characters (0/O, 1/I/L). 9 chars ≈ 45 bits —
+   * far past online guessing inside a 10-minute single-use window. */
+  const PAIRING_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ'
+  const PAIRING_CODE_TTL_MS = 10 * 60 * 1000
+
+  function sweepPairings(now: number = Date.now()): void {
+    for (const [code, issuedAt] of pairings) {
+      if (now - issuedAt > PAIRING_CODE_TTL_MS) pairings.delete(code)
+    }
+    // A stuck-open QR screen must not accumulate codes without bound.
+    while (pairings.size > 10) {
+      const oldest = pairings.keys().next()
+      if (oldest.done) break
+      pairings.delete(oldest.value)
+    }
+  }
 
   function resolveTrackId(id: string): string | null {
     if (!/^[0-9a-f]{64}$/.test(id)) return null
@@ -160,13 +312,106 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
     }
   }
 
-  function authorized(request: IncomingMessage, url: URL): boolean {
+/** Which credential authorized a request; null when none did. */
+type AuthResult = { kind: 'master' } | { kind: 'session' } | { kind: 'device'; token: string } | null
+
+  function authorized(request: IncomingMessage, url: URL): AuthResult {
     const token = deps.getToken()
-    if (!token) return false
+    if (!token) return null
     const header = request.headers.authorization
-    if (header?.startsWith('Bearer ')) return header.slice('Bearer '.length) === token
-    // <audio> and <img> tags cannot set headers, so media URLs carry it instead.
-    return url.searchParams.get('token') === token
+    const presented = header?.startsWith('Bearer ')
+      ? header.slice('Bearer '.length)
+      : (url.searchParams.get('token') ?? null)
+    if (presented === null) {
+      // The login cookie is the preferred credential: unlike the query token
+      // it never lands in logs, history, or referrers, and <audio>/<img>/
+      // EventSource send it automatically on same-origin requests.
+      const sessionId = sessionIdOf(request)
+      return sessionId && sessions.has(sessionId) ? { kind: 'session' } : null
+    }
+    if (presented === token) return { kind: 'master' }
+    // <audio> and <img> tags cannot set headers, so media URLs carry the
+    // credential instead — a device token works there exactly like the master.
+    if (devices.has(presented)) return { kind: 'device', token: presented }
+    return null
+  }
+
+  /**
+   * POST /api/session: trades the token (bearer header or JSON body, never
+   * the URL) for an HttpOnly login cookie. A wrong token gets a bare 401 —
+   * no cookie, no hint.
+   */
+  async function handleSession(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const token = deps.getToken()
+    const header = request.headers.authorization
+    const presented =
+      header?.startsWith('Bearer ') ? header.slice('Bearer '.length) : null
+    let bodyToken: string | null = null
+    if (presented === null) {
+      const raw = await readBody(request, SESSION_BODY_LIMIT)
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw) as Record<string, unknown>
+          bodyToken = typeof parsed['token'] === 'string' ? parsed['token'] : null
+        } catch {
+          bodyToken = null
+        }
+      }
+    }
+    const credential = presented ?? bodyToken
+    // The master token logs in, and so does any paired device token — a phone
+    // that paired yesterday must be able to open a session with the only
+    // credential it kept.
+    const known = token !== undefined && (credential === token || (credential !== null && devices.has(credential)))
+    if (!token || !known) {
+      json(response, 401, { error: 'unauthorized' })
+      return
+    }
+    const id = randomBytes(32).toString('hex')
+    sessions.set(id, Date.now())
+    await persistSessions()
+    response.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'set-cookie': `${SESSION_COOKIE}=${id}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${SESSION_MAX_AGE}`
+    })
+    response.end(JSON.stringify({ ok: true }))
+  }
+
+  /**
+   * POST /api/pair: trades a single-use pairing code (from the desktop QR or
+   * link) plus a device name for that device's own token. The code is
+   * consumed on success; a wrong code gets a bare 401 that reveals nothing.
+   */
+  async function handlePair(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    sweepPairings()
+    const raw = await readBody(request, SESSION_BODY_LIMIT)
+    let code: unknown = null
+    let name: unknown = null
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as Record<string, unknown>
+        code = parsed['code']
+        name = parsed['name']
+      } catch {
+        code = null
+      }
+    }
+    const trimmedName = typeof name === 'string' ? name.trim() : ''
+    if (trimmedName === '' || trimmedName.length > 64) {
+      json(response, 400, { error: 'a device name up to 64 characters is required' })
+      return
+    }
+    const issuedAt = typeof code === 'string' ? pairings.get(code) : undefined
+    if (typeof code !== 'string' || issuedAt === undefined) {
+      json(response, 401, { error: 'unauthorized' })
+      return
+    }
+    pairings.delete(code)
+    const token = randomBytes(32).toString('hex')
+    const now = Date.now()
+    devices.set(token, { token, name: trimmedName, createdAt: now, lastSeen: now })
+    await persistDevices()
+    json(response, 200, { token })
   }
 
   async function serveStream(path: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -299,6 +544,36 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost')
+    // The session handshake is the only POST: it must come before the
+    // GET-only gate below, and it answers 405 to anything else.
+    if (url.pathname === '/api/session') {
+      if (request.method !== 'POST') {
+        json(response, 405, { error: 'method not allowed' })
+        return
+      }
+      try {
+        await handleSession(request, response)
+      } catch {
+        if (!response.headersSent) json(response, 500, { error: 'request failed' })
+        else response.end()
+      }
+      return
+    }
+    // Pairing consumes its credential instead of presenting one, so like the
+    // handshake it sits outside the auth gate — with the same 405 discipline.
+    if (url.pathname === '/api/pair') {
+      if (request.method !== 'POST') {
+        json(response, 405, { error: 'method not allowed' })
+        return
+      }
+      try {
+        await handlePair(request, response)
+      } catch {
+        if (!response.headersSent) json(response, 500, { error: 'request failed' })
+        else response.end()
+      }
+      return
+    }
     if (request.method !== 'GET') {
       json(response, 405, { error: 'method not allowed' })
       return
@@ -314,9 +589,27 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
       }
       return
     }
-    if (!authorized(request, url)) {
+    const auth = authorized(request, url)
+    if (!auth) {
       json(response, 401, { error: 'unauthorized' })
       return
+    }
+    if (auth.kind === 'device') {
+      // Fresh activity for the settings list, persisted throttled so routine
+      // requests do not rewrite the config file every time.
+      const record = devices.get(auth.token)
+      if (!record) {
+        json(response, 401, { error: 'unauthorized' })
+        return
+      }
+      record.lastSeen = Date.now()
+      if (Date.now() - lastDevicesPersist > 60 * 1000) {
+        try {
+          await persistDevices()
+        } catch {
+          // Activity bookkeeping must never fail a media request.
+        }
+      }
     }
 
     if (url.pathname === '/api/library') {
@@ -367,11 +660,19 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
     },
 
     start(): Promise<string> {
-      if (server) return Promise.resolve(`http://localhost:${boundPort}`)
+      const scheme = deps.getTls() ? 'https' : 'http'
+      if (server) return Promise.resolve(`${scheme}://localhost:${boundPort}`)
       return new Promise((resolve, reject) => {
-        const next = createServer((request, response) => {
-          void handle(request, response)
-        })
+        // HTTPS when a certificate is available (production), plain HTTP
+        // otherwise (tests, or cert generation failed at enable time).
+        const tls = deps.getTls()
+        const next = tls
+          ? createHttpsServer({ cert: tls.cert, key: tls.key }, (request, response) => {
+              void handle(request, response)
+            })
+          : createServer((request, response) => {
+              void handle(request, response)
+            })
         next.on('error', (error: unknown) => {
           reject(error instanceof Error ? error : new Error('server failed to start'))
         })
@@ -380,7 +681,7 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
           listening = true
           const address = next.address()
           boundPort = typeof address === 'object' && address ? address.port : deps.getPort()
-          resolve(`http://localhost:${boundPort}`)
+          resolve(`${scheme}://localhost:${boundPort}`)
         })
       })
     },
@@ -412,6 +713,70 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
           events.delete(client)
         }
       }
+    },
+
+    tlsStatus(): { secure: boolean; fingerprint: string | null; expiresAt: number | null } {
+      const tls = listening ? deps.getTls() : null
+      if (!tls) return { secure: false, fingerprint: null, expiresAt: null }
+      try {
+        const certificate = new X509Certificate(tls.cert)
+        const expiresAt = Date.parse(certificate.validTo)
+        return {
+          secure: true,
+          fingerprint: certificate.fingerprint256,
+          expiresAt: Number.isFinite(expiresAt) ? expiresAt : null
+        }
+      } catch {
+        return { secure: true, fingerprint: null, expiresAt: null }
+      }
+    },
+
+    async dropSessions(): Promise<void> {
+      sessions.clear()
+      await persistSessions()
+    },
+
+    issuePairingCode(): PairingCode {
+      sweepPairings()
+      const bytes = randomBytes(9)
+      let code = ''
+      for (const byte of bytes) {
+        const char = PAIRING_CODE_ALPHABET[byte % PAIRING_CODE_ALPHABET.length]
+        code += char ?? ''
+      }
+      const now = Date.now()
+      pairings.set(code, now)
+      return { code, expiresAt: now + PAIRING_CODE_TTL_MS }
+    },
+
+    getDevices(): DeviceInfo[] {
+      return [...devices.values()].map((record) => ({
+        id: deviceId(record.token),
+        name: record.name,
+        createdAt: record.createdAt,
+        lastSeen: record.lastSeen
+      }))
+    },
+
+    async revokeDevice(id: string): Promise<boolean> {
+      for (const [token] of devices) {
+        if (deviceId(token) === id) {
+          devices.delete(token)
+          await persistDevices()
+          return true
+        }
+      }
+      return false
+    },
+
+    burnPairingCode(code: string): boolean {
+      return pairings.delete(code)
+    },
+
+    async dropDevices(): Promise<void> {
+      devices.clear()
+      pairings.clear()
+      await persistDevices()
     }
   }
 }

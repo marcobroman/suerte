@@ -162,14 +162,83 @@ describe('config', () => {
   it('round-trips a server section', async () => {
     await saveConfig(dir, {
       roots: ['/music'],
-      server: { enabled: true, port: 5000, token: 's3cret' }
+      server: { enabled: true, port: 5000, token: 's3cret', sessions: [], devices: [] }
     })
 
     expect((await loadConfig(dir)).server).toEqual({
       enabled: true,
       port: 5000,
-      token: 's3cret'
+      token: 's3cret',
+      sessions: [],
+      devices: []
     })
+  })
+
+  it('round-trips server sessions and drops malformed ones', async () => {
+    await saveConfig(dir, {
+      roots: ['/music'],
+      server: {
+        enabled: true,
+        port: 5000,
+        token: 's3cret',
+        sessions: [{ id: 'a1', createdAt: 123 }],
+        devices: [{ token: 'd1', name: 'Phone', createdAt: 10, lastSeen: 20 }]
+      }
+    })
+    expect((await loadConfig(dir)).server?.sessions).toEqual([{ id: 'a1', createdAt: 123 }])
+    expect((await loadConfig(dir)).server?.devices).toEqual([
+      { token: 'd1', name: 'Phone', createdAt: 10, lastSeen: 20 }
+    ])
+
+    await writeFile(
+      configPath(dir),
+      JSON.stringify({
+        version: 1,
+        roots: [],
+        server: {
+          enabled: false,
+          port: 5000,
+          sessions: [
+            { id: 'ok', createdAt: 7 },
+            { id: '', createdAt: 7 },
+            { id: 'ok', createdAt: 8 },
+            { id: 'nocreated' },
+            'garbage',
+            null
+          ]
+        }
+      }),
+      'utf8'
+    )
+    expect((await loadConfig(dir)).server?.sessions).toEqual([{ id: 'ok', createdAt: 7 }])
+  })
+
+  it('round-trips devices and drops malformed ones', async () => {
+    await writeFile(
+      configPath(dir),
+      JSON.stringify({
+        version: 1,
+        roots: [],
+        server: {
+          enabled: false,
+          port: 5000,
+          devices: [
+            { token: 'good', name: 'Phone', createdAt: 7, lastSeen: 9 },
+            { token: '', name: 'Blank', createdAt: 7, lastSeen: 9 },
+            { token: 'good', name: 'Dupe', createdAt: 7, lastSeen: 9 },
+            { token: 'noname', createdAt: 7, lastSeen: 9 },
+            { token: 'badtimestamps', name: 'X', createdAt: 'now', lastSeen: 9 },
+            'garbage',
+            null
+          ]
+        }
+      }),
+      'utf8'
+    )
+    expect((await loadConfig(dir)).server?.devices).toEqual([
+      { token: 'good', name: 'Phone', createdAt: 7, lastSeen: 9 },
+      { token: 'noname', name: 'Phone', createdAt: 7, lastSeen: 9 }
+    ])
   })
 
   it('keeps the token but falls back to the default port when malformed', async () => {
@@ -182,7 +251,9 @@ describe('config', () => {
     expect((await loadConfig(dir)).server).toEqual({
       enabled: true,
       port: DEFAULT_SERVER_PORT,
-      token: 's3cret'
+      token: 's3cret',
+      sessions: [],
+      devices: []
     })
 
     await writeFile(configPath(dir), JSON.stringify({ version: 1, roots: [] }), 'utf8')

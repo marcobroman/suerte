@@ -1,16 +1,24 @@
 import { useState } from 'react'
-import { HttpBackend } from '../http-backend'
+import { HttpBackend, exchangePairingCode } from '../http-backend'
 
 export interface PhoneBootProps {
   readonly initialBaseUrl: string
   readonly initialToken: string | null
+  /** Single-use pairing code from a desktop QR/link; null for manual entry. */
+  readonly initialPairingCode: string | null
   onConnect(baseUrl: string, token: string): void
 }
 
-/** First-run gate for the phone client: server address + access token, verified before entering. */
-export function PhoneBoot({ initialBaseUrl, initialToken, onConnect }: PhoneBootProps) {
+/**
+ * First-run gate for the phone client. Two doors: a pairing code from the
+ * desktop QR (preferred — the phone gets its own device token and the master
+ * token never leaves the desktop) or a manually entered token for old links.
+ */
+export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, onConnect }: PhoneBootProps) {
   const [baseUrl, setBaseUrl] = useState(initialBaseUrl)
   const [token, setToken] = useState(initialToken ?? '')
+  const [pairingCode] = useState(initialPairingCode ?? '')
+  const [deviceName, setDeviceName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -28,6 +36,59 @@ export function PhoneBoot({ initialBaseUrl, initialToken, onConnect }: PhoneBoot
     } finally {
       setBusy(false)
     }
+  }
+
+  const pair = async (): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    try {
+      const trimmedBase = baseUrl.trim()
+      const deviceToken = await exchangePairingCode(trimmedBase, pairingCode, deviceName)
+      const probe = new HttpBackend(trimmedBase, deviceToken, window.localStorage)
+      await probe.getLibrary()
+      onConnect(trimmedBase, deviceToken)
+    } catch (error: unknown) {
+      setError(error instanceof Error ? error.message : 'Pairing failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (pairingCode !== '') {
+    return (
+      <div className="boot">
+        <div className="boot-card">
+          <h1>Onda</h1>
+          <p className="content-sub">Pair this phone with your library.</p>
+          <label className="boot-label" htmlFor="boot-name">
+            Device name
+          </label>
+          <input
+            id="boot-name"
+            className="search boot-input"
+            type="text"
+            value={deviceName}
+            onChange={(event) => setDeviceName(event.target.value)}
+            placeholder="e.g. Marco's phone"
+            autoComplete="off"
+            maxLength={64}
+          />
+          {error !== null && (
+            <p className="modal-error" role="alert">
+              {error}
+            </p>
+          )}
+          <button
+            type="button"
+            className="primary-button boot-connect"
+            disabled={busy || deviceName.trim() === ''}
+            onClick={() => void pair()}
+          >
+            {busy ? 'Pairing…' : 'Pair this device'}
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (

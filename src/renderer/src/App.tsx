@@ -32,7 +32,7 @@ import {
   type Selection
 } from './library/view'
 import type { PlaybackControls } from './usePlaybackEngine'
-import { phoneEntryUrl } from './http-backend'
+import { phonePairUrl, describeServerUrl } from './http-backend'
 import type { Backend } from './backend'
 import { ViewportDebug } from './ViewportDebug'
 
@@ -60,10 +60,21 @@ export function App({ backend, playback, phone }: AppProps) {
     enabled: false,
     port: DEFAULT_SERVER_PORT,
     tokenSet: false,
-    url: null
+    url: null,
+    urls: [],
+    secure: false,
+    fingerprint: null,
+    certExpiresAt: null,
+    devices: []
   })
   const [serverToken, setServerToken] = useState<string | null>(null)
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
+  /** The pairing code behind the displayed QR, if any — burned on discard. */
+  const [qrCode, setQrCode] = useState<string | null>(null)
+  /** The server address the displayed QR pairs over, if any. */
+  const [qrBase, setQrBase] = useState<string | null>(null)
+  /** Expiry epoch ms of the displayed code, for the "valid until" caption. */
+  const [qrExpiry, setQrExpiry] = useState<number | null>(null)
   const [portDraft, setPortDraft] = useState('')
   const [serverBusy, setServerBusy] = useState(false)
   const [serverMessage, setServerMessage] = useState('')
@@ -240,66 +251,138 @@ export function App({ backend, playback, phone }: AppProps) {
   const regenerateServerToken = useCallback(() => {
     setServerBusy(true)
     setServerToken(null)
+    // Rotation already wipes every pending code server-side; this just
+    // clears a now-useless QR from the screen.
     setQrDataUrl(null)
+    setQrCode(null)
+    setQrBase(null)
+    setQrExpiry(null)
     void backend
       .regenerateServerToken()
       .then(
         (settings) => {
           refreshServerState(settings)
-          setServerMessage('New token generated — reconnect your phone.')
+          setServerMessage('New token generated — every phone is logged out.')
         },
         () => setServerMessage('Could not regenerate the token.')
       )
       .finally(() => setServerBusy(false))
   }, [backend, refreshServerState])
 
-  const resolvePhoneLink = useCallback(async (): Promise<string | null> => {
-    const base = serverState.url
-    if (!base) return null
-    const token = serverToken ?? (await backend.getServerToken())
-    if (!token) return null
-    setServerToken(token)
-    // Entry, not API: the boot screen reads the token from the fragment,
-    // which browsers never send to the server.
-    return phoneEntryUrl(base, token)
-  }, [backend, serverState.url, serverToken])
-
-  const copyPhoneLink = useCallback(async () => {
-    const link = await resolvePhoneLink()
-    if (!link) {
-      setServerMessage('Could not read the token.')
-      return
-    }
+  const regenerateServerCert = useCallback(() => {
     setServerBusy(true)
-    try {
-      await navigator.clipboard.writeText(link)
-      setServerMessage('Copied — paste it into the phone browser.')
-    } catch {
-      setServerMessage('Copy failed — select the link below manually.')
-    } finally {
-      setServerBusy(false)
-    }
-  }, [resolvePhoneLink])
+    setQrDataUrl(null)
+    setQrCode(null)
+    setQrBase(null)
+    setQrExpiry(null)
+    void backend
+      .regenerateServerCert()
+      .then(
+        (settings) => {
+          refreshServerState(settings)
+          setServerMessage('New certificate — phones confirm the new fingerprint once.')
+        },
+        () => setServerMessage('Could not regenerate the certificate.')
+      )
+      .finally(() => setServerBusy(false))
+  }, [backend, refreshServerState])
 
-  const toggleQrCode = useCallback(async () => {
-    if (qrDataUrl !== null) {
-      setQrDataUrl(null)
-      return
-    }
-    setServerBusy(true)
-    try {
-      const link = await resolvePhoneLink()
-      if (!link) {
-        setServerMessage('Could not read the token.')
-        return
+  const clearQrDisplay = useCallback(() => {
+    setQrDataUrl(null)
+    setQrCode(null)
+    setQrBase(null)
+    setQrExpiry(null)
+  }, [])
+
+  /**
+   * Invalidates the currently displayed pairing code, if any. Fire-and-
+   * forget: a failed burn only leaves the 10-minute expiry as the backstop.
+   */
+  const burnDisplayedCode = useCallback(() => {
+    if (qrCode === null) return
+    void backend.burnPairingCode(qrCode).catch(() => undefined)
+  }, [backend, qrCode])
+
+  const hideQrCode = useCallback(() => {
+    burnDisplayedCode()
+    clearQrDisplay()
+  }, [burnDisplayedCode, clearQrDisplay])
+
+  const showQrCode = useCallback(
+    async (base: string) => {
+      // The outgoing code dies first, so at most one displayed code is ever live.
+      burnDisplayedCode()
+      setServerBusy(true)
+      try {
+        // Pairing entry, not API: the boot screen reads the single-use code
+        // from the fragment, which browsers never send to the server — and
+        // the master token never leaves this machine.
+        const pairing = await backend.getPairingCode()
+        if (!pairing) {
+          setServerMessage('Could not create a pairing code.')
+          clearQrDisplay()
+          return
+        }
+        setQrCode(pairing.code)
+        setQrBase(base)
+        setQrExpiry(pairing.expiresAt)
+        setQrDataUrl(await QRCode.toDataURL(phonePairUrl(base, pairing.code), { width: 200, margin: 1 }))
+      } catch {
+        setServerMessage('Could not generate the QR code.')
+        clearQrDisplay()
+      } finally {
+        setServerBusy(false)
       }
-      setQrDataUrl(await QRCode.toDataURL(link, { width: 200, margin: 1 }))
-    } catch {
-      setServerMessage('Could not generate the QR code.')
-    } finally {
-      setServerBusy(false)
-    }
-  }, [qrDataUrl, resolvePhoneLink])
+    },
+    [backend, burnDisplayedCode, clearQrDisplay]
+  )
+
+  const renewQrCode = useCallback(() => {
+    if (qrBase !== null) void showQrCode(qrBase)
+  }, [qrBase, showQrCode])
+
+  const copyPairLink = useCallback(
+    async (base: string) => {
+      setServerBusy(true)
+      try {
+        const pairing = await backend.getPairingCode()
+        if (!pairing) {
+          setServerMessage('Could not create a pairing code.')
+          return
+        }
+        await navigator.clipboard.writeText(phonePairUrl(base, pairing.code))
+        setServerMessage('Copied — open it on the phone within 10 minutes.')
+      } catch {
+        setServerMessage('Copy failed — generate a QR code instead.')
+      } finally {
+        setServerBusy(false)
+      }
+    },
+    [backend]
+  )
+
+  // Closing Settings with a QR on screen discards it like Hide does: the
+  // displayed code is burned, so a photo of it stops working immediately.
+  useEffect(() => {
+    if (!settingsOpen && qrCode !== null) hideQrCode()
+  }, [settingsOpen, qrCode, hideQrCode])
+
+  const revokeDevice = useCallback(
+    (id: string) => {
+      setServerBusy(true)
+      void backend
+        .revokeServerDevice(id)
+        .then(
+          (settings) => {
+            refreshServerState(settings)
+            setServerMessage('Device revoked — it is logged out immediately.')
+          },
+          () => setServerMessage('Could not revoke the device.')
+        )
+        .finally(() => setServerBusy(false))
+    },
+    [backend, refreshServerState]
+  )
 
   const changeTheme = useCallback((next: ThemeId) => {
     // Applied immediately; main confirms and persists it.
@@ -812,30 +895,42 @@ export function App({ backend, playback, phone }: AppProps) {
                     </label>
                     {serverState.enabled && (
                       <>
-                        <p className="settings-note">
-                          {serverState.url ?? 'Not reachable — the port may be taken.'}
-                        </p>
-                        {serverState.url !== null && (
-                          <>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="settings-item"
-                              disabled={serverBusy}
-                              onClick={() => void copyPhoneLink()}
-                            >
-                              Copy phone link (with token)
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="settings-item"
-                              disabled={serverBusy}
-                              onClick={() => void toggleQrCode()}
-                            >
-                              {qrDataUrl !== null ? 'Hide QR code' : 'Show QR code'}
-                            </button>
-                          </>
+                        {serverState.url !== null ? (
+                          serverState.urls.map((reachable) => {
+                            const kind = describeServerUrl(reachable)
+                            return (
+                              <div key={reachable}>
+                                <p className="settings-note">{reachable}</p>
+                                <p className="settings-note">
+                                  {kind === 'tailscale'
+                                    ? 'Tailscale — works from anywhere'
+                                    : 'Home network — same Wi-Fi only'}
+                                </p>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  className="settings-item"
+                                  disabled={serverBusy}
+                                  onClick={() => void copyPairLink(reachable)}
+                                >
+                                  Copy pairing link (10 minutes)
+                                </button>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  className="settings-item"
+                                  disabled={serverBusy}
+                                  onClick={() => void showQrCode(reachable)}
+                                >
+                                  Show QR code
+                                </button>
+                              </div>
+                            )
+                          })
+                        ) : (
+                          <p className="settings-note">
+                            Not reachable — the port may be taken.
+                          </p>
                         )}
                         {qrDataUrl !== null && (
                           <>
@@ -845,8 +940,31 @@ export function App({ backend, playback, phone }: AppProps) {
                               alt="QR code linking to the phone client"
                             />
                             <p className="settings-note">
-                              Anyone who scans this can access your library.
+                              Pairs over{' '}
+                              {qrBase !== null && describeServerUrl(qrBase) === 'tailscale'
+                                ? 'Tailscale'
+                                : 'the home network'}
+                              {qrExpiry !== null &&
+                                ` — code valid until ${new Date(qrExpiry).toLocaleTimeString()}`}.
+                              Hiding it kills the code immediately.
                             </p>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="settings-item"
+                              disabled={serverBusy || qrBase === null}
+                              onClick={() => renewQrCode()}
+                            >
+                              New code
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="settings-item"
+                              onClick={() => hideQrCode()}
+                            >
+                              Hide QR code
+                            </button>
                           </>
                         )}
                         <div className="token-row">
@@ -889,6 +1007,55 @@ export function App({ backend, playback, phone }: AppProps) {
                         >
                           New access token
                         </button>
+                        <p className="settings-label">Security</p>
+                        <p className="settings-note">
+                          {serverState.secure
+                            ? 'Encrypted — phones connect over TLS. Confirm this fingerprint on first connect:'
+                            : 'Not encrypted — the server runs plain HTTP.'}
+                        </p>
+                        {serverState.fingerprint !== null && (
+                          <p className="settings-note token-value">{serverState.fingerprint}</p>
+                        )}
+                        {serverState.certExpiresAt !== null && (
+                          <p className="settings-note">
+                            Certificate valid until{' '}
+                            {new Date(serverState.certExpiresAt).toLocaleDateString()}
+                          </p>
+                        )}
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="settings-item"
+                          disabled={serverBusy}
+                          onClick={regenerateServerCert}
+                        >
+                          New certificate
+                        </button>
+                        <p className="settings-label">Connected devices</p>
+                        {serverState.devices.length === 0 ? (
+                          <p className="settings-note">
+                            No paired devices — scan the QR code to pair one.
+                          </p>
+                        ) : (
+                          serverState.devices.map((device) => (
+                            <div key={device.id} className="token-row">
+                              <p className="settings-note">
+                                {device.name} · paired{' '}
+                                {new Date(device.createdAt).toLocaleDateString()} · seen{' '}
+                                {new Date(device.lastSeen).toLocaleString()}
+                              </p>
+                              <button
+                                type="button"
+                                className="token-save"
+                                disabled={serverBusy}
+                                onClick={() => revokeDevice(device.id)}
+                                aria-label={`Revoke ${device.name}`}
+                              >
+                                Revoke
+                              </button>
+                            </div>
+                          ))
+                        )}
                       </>
                     )}
                     {serverMessage !== '' && <p className="settings-note">{serverMessage}</p>}

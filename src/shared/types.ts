@@ -144,6 +144,16 @@ export interface ServerStatus {
   readonly tokenSet: boolean
   /** Reachable base URL while the server runs, else null. */
   readonly url: string | null
+  /** Every reachable base URL (LAN plus tailnet when present), else []. */
+  readonly urls: readonly string[]
+  /** True while clients are served over TLS. */
+  readonly secure: boolean
+  /** SHA-256 cert fingerprint for trust-on-first-use, else null. */
+  readonly fingerprint: string | null
+  /** Cert expiry epoch ms, else null. */
+  readonly certExpiresAt: number | null
+  /** Paired phones/devices, for the desktop settings list. Always [] on phones. */
+  readonly devices: readonly DeviceInfo[]
 }
 
 /** Persisted LAN server config. The token is generated on first enable. */
@@ -151,6 +161,42 @@ export interface ServerConfig {
   readonly enabled: boolean
   readonly port: number
   readonly token: string | undefined
+  /**
+   * Issued login sessions (opaque ids, one per paired browser). Persisted so
+   * phones stay logged in across restarts; wiped when the token rotates.
+   */
+  readonly sessions: readonly ServerSession[]
+  /**
+   * Paired devices (per-device tokens). The master token never leaves the
+   * desktop: phones pair through single-use codes and get their own token,
+   * revocable individually. Wiped when the token rotates.
+   */
+  readonly devices: readonly DeviceRecord[]
+}
+
+/** One issued phone/browser login session for the LAN server. */
+export interface ServerSession {
+  readonly id: string
+  readonly createdAt: number
+}
+
+/** One paired device: its own token plus a human name for the settings list. */
+export interface DeviceRecord {
+  readonly token: string
+  readonly name: string
+  readonly createdAt: number
+  readonly lastSeen: number
+}
+
+/**
+ * Device list entry for the desktop UI. The id is a one-way hash of the
+ * device token — enough to revoke by, useless to log in with.
+ */
+export interface DeviceInfo {
+  readonly id: string
+  readonly name: string
+  readonly createdAt: number
+  readonly lastSeen: number
 }
 
 export const DEFAULT_SERVER_PORT = 4280

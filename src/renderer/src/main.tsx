@@ -2,7 +2,7 @@ import { StrictMode, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import type { Backend } from './backend'
-import { HttpBackend, loadServerCredentials, saveServerCredentials, tokenFromHash } from './http-backend'
+import { HttpBackend, loadServerCredentials, pairFromHash, saveServerCredentials, tokenFromHash } from './http-backend'
 import { CoverStore } from './library/covers'
 import { CoverStoreContext } from './library/coverStore'
 import { PhoneBoot } from './library/PhoneBoot'
@@ -50,6 +50,7 @@ function Root() {
       <PhoneBoot
         initialBaseUrl={window.location.origin}
         initialToken={tokenFromHash(window.location.hash)}
+        initialPairingCode={pairFromHash(window.location.hash)}
         onConnect={(baseUrl, token) => {
           saveServerCredentials(window.localStorage, { baseUrl, token })
           setPhoneBackend(new HttpBackend(baseUrl, token, window.localStorage))

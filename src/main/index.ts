@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { app, BrowserWindow, shell } from 'electron'
 import { loadConfig, saveConfig } from './config'
+import { ensureServerCert } from './cert'
 import { createIpcContext, registerIpc, rescan } from './ipc'
 import { createLibraryServer } from './server'
 import { readCoverDataUrl } from './library/covers'
@@ -60,9 +61,39 @@ app.whenReady().then(async () => {
   ipcContext.eq = config.eq
   if (config.server) ipcContext.serverConfig = { ...config.server }
 
+  const persistServerState = async (): Promise<void> => {
+    await saveConfig(userDataDir, {
+      roots: ipcContext.roots,
+      theme: ipcContext.theme,
+      discogsToken: ipcContext.discogsToken,
+      eq: ipcContext.eq,
+      server: {
+        enabled: ipcContext.serverConfig.enabled,
+        port: ipcContext.serverConfig.port,
+        token: ipcContext.serverConfig.token,
+        sessions: [...ipcContext.serverConfig.sessions],
+        devices: ipcContext.serverConfig.devices.map((device) => ({ ...device }))
+      }
+    })
+  }
+
   ipcContext.server = createLibraryServer({
     getPort: () => ipcContext.serverConfig.port,
     getToken: () => ipcContext.serverConfig.token,
+    getTls: () => ipcContext.serverTls,
+    getSessions: () => ipcContext.serverConfig.sessions,
+    saveSessions: (sessions) => {
+      ipcContext.serverConfig = { ...ipcContext.serverConfig, sessions: [...sessions] }
+      return persistServerState()
+    },
+    getDevices: () => ipcContext.serverConfig.devices,
+    saveDevices: (devices) => {
+      ipcContext.serverConfig = {
+        ...ipcContext.serverConfig,
+        devices: devices.map((device) => ({ ...device }))
+      }
+      return persistServerState()
+    },
     getSummary: () => ({
       tree: ipcContext.tree,
       tracks: ipcContext.tracks,
@@ -86,17 +117,13 @@ app.whenReady().then(async () => {
         ...ipcContext.serverConfig,
         token: randomBytes(32).toString('hex')
       }
-      await saveConfig(userDataDir, {
-        roots: ipcContext.roots,
-        theme: ipcContext.theme,
-        discogsToken: ipcContext.discogsToken,
-        eq: ipcContext.eq,
-        server: {
-          enabled: ipcContext.serverConfig.enabled,
-          port: ipcContext.serverConfig.port,
-          token: ipcContext.serverConfig.token
-        }
-      })
+      await persistServerState()
+    }
+    try {
+      ipcContext.serverTls = await ensureServerCert(userDataDir)
+    } catch {
+      // No identity: the server still starts over plain HTTP below.
+      ipcContext.serverTls = null
     }
     try {
       await ipcContext.server.start()

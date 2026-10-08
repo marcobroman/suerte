@@ -21,7 +21,11 @@ export const IPC = {
   setServerEnabled: 'server:set-enabled',
   setServerPort: 'server:set-port',
   regenerateServerToken: 'server:regenerate-token',
-  getServerToken: 'server:get-token'
+  regenerateServerCert: 'server:regenerate-cert',
+  getServerToken: 'server:get-token',
+  getPairingCode: 'server:pairing-code',
+  burnPairingCode: 'server:burn-code',
+  revokeServerDevice: 'server:revoke-device'
 } as const
 
 export const SCAN_PROGRESS_CHANNEL = 'scan:progress'
@@ -90,7 +94,25 @@ export interface IpcApi {
   setServerEnabled(on: unknown): Promise<AppSettings>
   setServerPort(port: unknown): Promise<AppSettings>
   regenerateServerToken(): Promise<AppSettings>
+  /**
+   * Rotates the TLS certificate (new fingerprint — phones re-trust once).
+   * Sessions and devices survive: the identity changed, the logins did not.
+   */
+  regenerateServerCert(): Promise<AppSettings>
   getServerToken(): Promise<string | null>
+  /**
+   * Mints a single-use pairing code for the QR/link flow, or null when the
+   * server is not listening (a code would be unusable). The master token
+   * itself never travels to the phone.
+   */
+  getPairingCode(): Promise<{ code: string; expiresAt: number } | null>
+  /**
+   * Invalidates a previously displayed pairing code (its QR was hidden).
+   * Unknown codes are a silent no-op; nothing observable changes.
+   */
+  burnPairingCode(code: unknown): Promise<void>
+  /** Revokes one paired device by its id; unknown ids are a no-op success. */
+  revokeServerDevice(id: unknown): Promise<AppSettings>
   onScanProgress(callback: (progress: ScanProgress) => void): () => void
   onLibraryChanged(callback: (summary: LibrarySummary) => void): () => void
 }

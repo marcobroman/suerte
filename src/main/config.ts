@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { DEFAULT_SERVER_PORT, DEFAULT_THEME, EQ_BAND_COUNT, isThemeId, type PersistedEqSettings, type ServerConfig, type ThemeId } from '@shared/types'
+import { DEFAULT_SERVER_PORT, DEFAULT_THEME, EQ_BAND_COUNT, isThemeId, type DeviceRecord, type PersistedEqSettings, type ServerConfig, type ServerSession, type ThemeId } from '@shared/types'
 
 export const CONFIG_VERSION = 1
 export const CONFIG_FILE = 'library.json'
@@ -122,8 +122,62 @@ export function normalizeServerConfig(value: unknown): ServerConfig | undefined 
       typeof port === 'number' && Number.isInteger(port) && port >= 1024 && port <= 65535
         ? port
         : DEFAULT_SERVER_PORT,
-    token: normalizeToken(record['token'])
+    token: normalizeToken(record['token']),
+    sessions: normalizeServerSessions(record['sessions']),
+    devices: normalizeDeviceRecords(record['devices'])
   }
+}
+
+/**
+ * Shape-checks persisted login sessions. A hand-edited or corrupt entry is
+ * dropped rather than trusted; an empty list simply means "no phones logged
+ * in", which is always a safe fallback.
+ */
+export function normalizeServerSessions(value: unknown): ServerSession[] {
+  if (!Array.isArray(value)) return []
+  const sessions: ServerSession[] = []
+  const seen = new Set<string>()
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const record = entry as Record<string, unknown>
+    const id = record['id']
+    const createdAt = record['createdAt']
+    if (typeof id !== 'string' || id === '' || seen.has(id)) continue
+    if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) continue
+    seen.add(id)
+    sessions.push({ id, createdAt })
+  }
+  return sessions
+}
+
+/**
+ * Shape-checks persisted paired devices. Same policy as sessions: malformed
+ * entries are dropped, duplicates collapse on the token, and names are
+ * clamped so a corrupt file cannot inject unbounded strings into the UI.
+ */
+export function normalizeDeviceRecords(value: unknown): DeviceRecord[] {
+  if (!Array.isArray(value)) return []
+  const devices: DeviceRecord[] = []
+  const seen = new Set<string>()
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const record = entry as Record<string, unknown>
+    const token = record['token']
+    const name = record['name']
+    const createdAt = record['createdAt']
+    const lastSeen = record['lastSeen']
+    if (typeof token !== 'string' || token === '' || seen.has(token)) continue
+    if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) continue
+    if (typeof lastSeen !== 'number' || !Number.isFinite(lastSeen)) continue
+    seen.add(token)
+    devices.push({
+      token,
+      name: typeof name === 'string' && name !== '' ? name.slice(0, 64) : 'Phone',
+      createdAt,
+      lastSeen
+    })
+  }
+  return devices
 }
 
 /**

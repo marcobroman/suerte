@@ -6,12 +6,13 @@ import type { LibraryTree, PersistedEqSettings, ScanResult, ServerConfig, TagWri
 import { DEFAULT_SERVER_PORT, DEFAULT_THEME, isThemeId, type AppSettings } from '@shared/types'
 import { CoverCache, readCoverDataUrl } from './library/covers'
 import { normalizePersistedEq, normalizeToken, saveConfig } from './config'
+import { ensureServerCert, type ServerCert } from './cert'
 import { createDiscogsClient, DiscogsError } from './discogs'
 import { LibraryCache } from './library/cache'
 import { findMissingRoots } from './library/roots'
 import { scanLibrary } from './library/scan'
 import { sanitizeTagEdits, writeTrackTags } from './library/tags'
-import { lanBaseUrl, type LibraryServer } from './server'
+import { lanBaseUrl, lanBaseUrls, type LibraryServer } from './server'
 import { readAudioBytes } from './util/read-bytes'
 
 /**
@@ -29,6 +30,8 @@ export interface IpcContext {
   serverConfig: ServerConfig
   /** Running LAN server, if enabled. Owned by main/index.ts lifecycle. */
   server: LibraryServer | null
+  /** Live TLS identity for the server; minted on first enable. */
+  serverTls: ServerCert | null
   tree: LibraryTree
   tracks: readonly Track[]
   readonly cache: LibraryCache
@@ -48,8 +51,9 @@ export function createIpcContext(
     theme,
     discogsToken: undefined,
     eq: undefined,
-    serverConfig: { enabled: false, port: DEFAULT_SERVER_PORT, token: undefined },
+    serverConfig: { enabled: false, port: DEFAULT_SERVER_PORT, token: undefined, sessions: [], devices: [] },
     server: null,
+    serverTls: null,
     tree: { artists: [], albums: [] },
     tracks: [],
     cache: new LibraryCache(),
@@ -118,6 +122,8 @@ function summarize(context: IpcContext): LibrarySummary {
 /** Tokens and curves never leave main in raw form; renderers get presence flags and copies. */
 function settingsOf(context: IpcContext): AppSettings {
   const server = context.server
+  const tls = server?.tlsStatus() ?? { secure: false, fingerprint: null, expiresAt: null }
+  const running = context.serverConfig.enabled && (server?.listening ?? false)
   return {
     theme: context.theme,
     discogsTokenSet: context.discogsToken !== undefined,
@@ -126,10 +132,15 @@ function settingsOf(context: IpcContext): AppSettings {
       enabled: context.serverConfig.enabled,
       port: context.serverConfig.port,
       tokenSet: context.serverConfig.token !== undefined,
-      url:
-        context.serverConfig.enabled && server?.listening
-          ? (lanBaseUrl(context.serverConfig.port) ?? `http://localhost:${context.serverConfig.port}`)
-          : null
+      url: running
+        ? (lanBaseUrl(context.serverConfig.port, tls.secure) ??
+          `${tls.secure ? 'https' : 'http'}://localhost:${context.serverConfig.port}`)
+        : null,
+      urls: running ? lanBaseUrls(context.serverConfig.port, tls.secure) : [],
+      secure: tls.secure,
+      fingerprint: tls.fingerprint,
+      certExpiresAt: tls.expiresAt,
+      devices: server?.getDevices() ?? []
     }
   }
 }
@@ -138,7 +149,9 @@ function serverConfigOf(context: IpcContext): ServerConfig {
   return {
     enabled: context.serverConfig.enabled,
     port: context.serverConfig.port,
-    token: context.serverConfig.token
+    token: context.serverConfig.token,
+    sessions: [...context.serverConfig.sessions],
+    devices: context.serverConfig.devices.map((device) => ({ ...device }))
   }
 }
 
@@ -227,6 +240,14 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
     }
     await persistConfig()
     if (on) {
+      // The TLS identity is minted before the first listen so the server
+      // never serves plain HTTP in production. If generation fails the
+      // server starts without it rather than not at all.
+      try {
+        context.serverTls = await ensureServerCert(context.configDir)
+      } catch {
+        context.serverTls = null
+      }
       try {
         await context.server?.start()
       } catch {
@@ -258,12 +279,55 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
   })
 
   ipcMain.handle(IPC.regenerateServerToken, async (): Promise<AppSettings> => {
-    context.serverConfig = { ...context.serverConfig, token: randomBytes(32).toString('hex') }
+    // A rotated token must log every phone out: surviving sessions or device
+    // tokens would keep the old secret's access alive, defeating the rotation.
+    context.serverConfig = {
+      ...context.serverConfig,
+      token: randomBytes(32).toString('hex'),
+      sessions: [],
+      devices: []
+    }
+    context.server?.dropSessions()
+    await context.server?.dropDevices()
     await persistConfig()
     return settingsOf(context)
   })
 
   ipcMain.handle(IPC.getServerToken, (): string | null => context.serverConfig.token ?? null)
+
+  ipcMain.handle(IPC.regenerateServerCert, async (): Promise<AppSettings> => {
+    // A new identity means phones re-trust once via the new fingerprint;
+    // sessions and devices survive because the logins did not change.
+    // The server restarts so the new certificate takes effect immediately.
+    context.serverTls = await ensureServerCert(context.configDir, true)
+    if (context.server?.listening) {
+      await context.server.stop()
+      try {
+        await context.server.start()
+      } catch {
+        // Same taken-port story: stopped with a null URL.
+      }
+    }
+    return settingsOf(context)
+  })
+
+  ipcMain.handle(IPC.getPairingCode, () => {
+    // A code is only useful while a phone can actually redeem it.
+    if (!context.serverConfig.enabled || !context.server?.listening) return null
+    return context.server.issuePairingCode()
+  })
+
+  ipcMain.handle(IPC.burnPairingCode, (_event, code: unknown): void => {
+    if (typeof code === 'string' && code !== '') context.server?.burnPairingCode(code)
+  })
+
+  ipcMain.handle(IPC.revokeServerDevice, async (_event, id: unknown): Promise<AppSettings> => {
+    if (typeof id === 'string' && context.server) {
+      await context.server.revokeDevice(id)
+    }
+    await persistConfig()
+    return settingsOf(context)
+  })
 
   ipcMain.handle(IPC.readFile, (_event, path: string) => readAudioBytes(path))
 
