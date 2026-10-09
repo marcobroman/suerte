@@ -364,6 +364,82 @@ describe('HttpBackend', () => {
     expect(store.has('onda.phone.server')).toBe(false)
   })
 
+  it('routes a dead credential found by the auth probe to logout', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/api/fingerprint')) return jsonResponse({})
+        return jsonResponse({ error: 'revoked' }, 401)
+      })
+    )
+    const backend = makeBackend()
+    let loggedOut = 0
+    backend.onLoggedOut = () => {
+      loggedOut += 1
+    }
+    // First login succeeds so the probe has a session to lose... except the
+    // stub 401s everything: establish ever-ready via a good round first.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/api/fingerprint')) return jsonResponse({})
+        return jsonResponse({ ok: true })
+      })
+    )
+    await backend.startSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/api/fingerprint')) return jsonResponse({})
+        return jsonResponse({ error: 'revoked' }, 401)
+      })
+    )
+
+    await backend.probeAuthAfterFailure()
+
+    expect(loggedOut).toBe(1)
+  })
+
+  it('stays silent when the probe cannot reach the server', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('network down')
+      })
+    )
+    const backend = makeBackend()
+    let loggedOut = 0
+    backend.onLoggedOut = () => {
+      loggedOut += 1
+    }
+
+    await backend.probeAuthAfterFailure()
+
+    expect(loggedOut).toBe(0)
+  })
+
+  it('debounces rapid probes into one handshake', async () => {
+    let sessions = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/api/fingerprint')) return jsonResponse({})
+        if (url.endsWith('/api/session')) sessions += 1
+        return jsonResponse({ ok: true })
+      })
+    )
+    const backend = makeBackend()
+    backend.onLoggedOut = () => {}
+
+    backend.probeAuthAfterFailure()
+    backend.probeAuthAfterFailure()
+    backend.probeAuthAfterFailure()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // One probe handshake plus its success-path refresh — not three of each.
+    expect(sessions).toBe(2)
+  })
+
   it('keeps theme and EQ per device in local storage', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({})))
     const backend = makeBackend()
@@ -456,11 +532,13 @@ describe('fingerprintFromHash', () => {
     expect(fingerprintFromHash('#t=abc&fp=XYZ')).toBe('XYZ')
   })
 
-  it('rejects empties and garbage', () => {
+  it('rejects empties, garbage, and absurd lengths', () => {
     expect(fingerprintFromHash('')).toBeNull()
     expect(fingerprintFromHash('#fp=')).toBeNull()
     expect(fingerprintFromHash('#pair=AB3')).toBeNull()
     expect(fingerprintFromHash('#fp=%ZZ')).toBeNull()
+    expect(fingerprintFromHash(`#fp=${'A'.repeat(257)}`)).toBeNull()
+    expect(fingerprintFromHash(`#fp=${'A'.repeat(256)}`)).toBe('A'.repeat(256))
   })
 })
 
@@ -579,6 +657,16 @@ describe('server credentials', () => {
       token: 'tok',
       fingerprint: null
     })
+  })
+
+  it('drops over-long fingerprints from storage', () => {
+    const { store, storage } = stubStorage()
+    store.set(
+      'onda.phone.server',
+      JSON.stringify({ baseUrl: 'https://phone:4280', token: 'tok', fingerprint: 'A'.repeat(300) })
+    )
+
+    expect(loadServerCredentials(storage)?.fingerprint).toBeNull()
   })
 
   it('drops blanks and malformed entries', () => {

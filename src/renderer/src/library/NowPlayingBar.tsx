@@ -22,6 +22,8 @@ export interface NowPlayingBarProps {
   readonly shuffle: boolean
   /** Phone client: hardware buttons own the volume, so the slider hides. */
   readonly phone: boolean
+  /** Fired when the now-playing image fails (lets the phone probe a dead credential). */
+  readonly onCoverError?: () => void
   readonly queueOpen: boolean
   onToggle(): void
   onNext(): void
@@ -50,6 +52,7 @@ export function NowPlayingBar({
   shuffle,
   phone,
   queueOpen,
+  onCoverError,
   onToggle,
   onNext,
   onPrevious,
@@ -67,7 +70,7 @@ export function NowPlayingBar({
   return (
     <footer className="player">
       <div className="player-now">
-        <CoverArt path={track?.path ?? null} size={56} alt="" rounded />
+        <CoverArt path={track?.path ?? null} size={56} alt="" rounded onError={onCoverError} />
         <div className="now-text">
           <span className="now-title">{track?.title ?? 'Nothing playing'}</span>
           <span className="now-artist">{track?.artist || 'Unknown artist'}</span>

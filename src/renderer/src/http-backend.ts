@@ -67,7 +67,7 @@ export function loadServerCredentials(storage: KeyValueStorage): ServerCredentia
   return {
     baseUrl: record['baseUrl'],
     token: record['token'],
-    fingerprint: typeof fingerprint === 'string' && fingerprint !== '' ? fingerprint : null
+    fingerprint: normalizeFingerprint(fingerprint)
   }
 }
 
@@ -163,10 +163,20 @@ export function fingerprintFromHash(hash: string): string | null {
   if (!match?.[1]) return null
   try {
     const fingerprint = decodeURIComponent(match[1])
-    return fingerprint === '' ? null : fingerprint
+    return normalizeFingerprint(fingerprint)
   } catch {
     return null
   }
+}
+
+/**
+ * Fingerprints are short colon-hex strings (95 chars for SHA-256); anything
+ * longer is a junk or hostile pin — a malicious link or server must not be
+ * able to plant megabytes into storage and the UI. Null when absent/blank.
+ */
+export function normalizeFingerprint(value: unknown): string | null {
+  if (typeof value !== 'string' || value === '') return null
+  return value.length <= 256 ? value : null
 }
 
 /**
@@ -183,7 +193,8 @@ export async function assertServerIdentity(
   const identity = await readJson<{ fingerprint?: unknown }>(
     await fetch(`${baseUrl.replace(/\/+$/, '')}/api/fingerprint`)
   )
-  const actual = typeof identity.fingerprint === 'string' ? identity.fingerprint : null
+  // Length-capped: a hostile server must not plant bulk into storage/UI.
+  const actual = normalizeFingerprint(identity.fingerprint)
   if (expectedFingerprint !== null && actual !== expectedFingerprint) {
     throw new ServerIdentityChangedError()
   }
@@ -278,6 +289,7 @@ export class HttpBackend implements Backend {
   readonly #storage: KeyValueStorage
   #expectedFingerprint: string | null
   #sessionReady = false
+  #sessionEverReady = false
   #sessionFlight: Promise<void> | null = null
   #lastAuthProbe = 0
   /**
@@ -339,6 +351,7 @@ export class HttpBackend implements Backend {
           })
         }
         this.#sessionReady = true
+        this.#sessionEverReady = true
       })()
       // Clearing the flight must never surface as its own rejection: awaiters
       // already observe the original promise, so both branches resolve here.
@@ -409,12 +422,36 @@ export class HttpBackend implements Backend {
    * Called when a tag or socket fails without an HTTP status: re-checks
    * auth (debounced) and routes genuine logouts to boot. Transient blips
    * just refresh the session; status-less failures otherwise stay silent.
+   *
+   * Only an explicit 401 from a phone that previously held a session means
+   * logout. Anything else — unreachable server, tunnel drop, first-login
+   * failure — stays silent: the phone is offline or never logged in, not
+   * logged out.
    */
-  probeAuthAfterFailure(): void {
+  async probeAuthAfterFailure(): Promise<void> {
     const now = Date.now()
     if (now - this.#lastAuthProbe < 30_000) return
     this.#lastAuthProbe = now
-    void this.revalidateSession().then(undefined, (error: unknown) => this.noteIfLoggedOut(error))
+    try {
+      const response = await fetch(`${this.#baseUrl}/api/session`, {
+        method: 'POST',
+        headers: this.#headers()
+      })
+      if (response.status === 401 && this.#sessionEverReady) {
+        this.onLoggedOut?.()
+        return
+      }
+      if (response.ok) {
+        // Credential valid after all (stale cookie, transient media
+        // failure): refresh the session so media recovers without a reload.
+        // Identity mismatch here is swallowed — sessions survive cert
+        // rotation by design, so there is nothing to route.
+        this.#sessionReady = false
+        await this.startSession().catch(() => undefined)
+      }
+    } catch {
+      // Unreachable: silent, as before.
+    }
   }
 
   /** Routes login-death to boot; returns the error for throw sites. */

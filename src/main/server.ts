@@ -505,21 +505,24 @@ type AuthResult =
   | null
 
 /**
- * Lifetimes: sessions die 30 days after issue no matter what, or after 7
- * idle days; devices die after 90 idle days with no absolute cap (re-pairing
- * is user-visible friction, rotation covers emergencies). Abandoned phones
- * fall off by themselves; active ones never notice.
+ * Lifetimes: sessions die 7 days after issue no matter what, or after 24
+ * idle hours; devices die 180 days after pairing or after 90 idle days.
+ * Abandoned phones fall off by themselves; active ones never notice (the
+ * client re-logs-in silently on a stale cookie while its device is valid).
  */
-const SESSION_ABSOLUTE_TTL_MS = 30 * 24 * 60 * 60 * 1000
-const SESSION_IDLE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const SESSION_ABSOLUTE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const SESSION_IDLE_TTL_MS = 24 * 60 * 60 * 1000
+const DEVICE_ABSOLUTE_TTL_MS = 180 * 24 * 60 * 60 * 1000
 const DEVICE_IDLE_TTL_MS = 90 * 24 * 60 * 60 * 1000
 
 function sessionAlive(session: { createdAt: number; lastSeen: number }, now: number): boolean {
   return now - session.createdAt <= SESSION_ABSOLUTE_TTL_MS && now - session.lastSeen <= SESSION_IDLE_TTL_MS
 }
 
-function deviceAlive(record: { lastSeen: number }, now: number): boolean {
-  return now - record.lastSeen <= DEVICE_IDLE_TTL_MS
+function deviceAlive(record: { createdAt: number; lastSeen: number }, now: number): boolean {
+  return (
+    now - record.createdAt <= DEVICE_ABSOLUTE_TTL_MS && now - record.lastSeen <= DEVICE_IDLE_TTL_MS
+  )
 }
 
 /**

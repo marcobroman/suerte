@@ -486,6 +486,17 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
       .then(() => loggedOutRef.current?.('Logged out on this phone.'))
   }, [backend, phone])
 
+  /**
+   * Cover-image failures feed the phone's auth probe: tags report no status,
+   * so a burst of broken covers is the only signal a dead credential sends
+   * through images. The probe itself is debounced backend-side; desktop
+   * backends have no probe, so this is a phone-only no-op there.
+   */
+  const probeCovers = useCallback((): void => {
+    if (!phone) return
+    void (backend as HttpBackend).probeAuthAfterFailure()
+  }, [backend, phone])
+
   // Closing Settings with a QR on screen discards it like Hide does: the
   // displayed code is burned, so a photo of it stops working immediately.
   useEffect(() => {
@@ -878,6 +889,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
           missingRoots={summary?.missingRoots ?? []}
           query={query}
           phone={phone}
+          onCoverError={probeCovers}
           onSelect={select}
           onRemoveRoot={removeRoot}
         />
@@ -1306,6 +1318,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
                       albums={sortedSearchAlbums}
                       query=""
                       phone={phone}
+                      onCoverError={probeCovers}
                       onOpen={openSearchAlbum}
                       onPlay={playAlbum}
                       onQueueNext={queueAlbumNext}
@@ -1391,6 +1404,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
                   albums={sortedBrowseAlbums}
                   query={query}
                   phone={phone}
+                  onCoverError={probeCovers}
                   onOpen={openAlbum}
                   onPlay={playAlbum}
                   onQueueNext={queueAlbumNext}
@@ -1404,6 +1418,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
                 tracks={view.tracks}
                 query={query}
                 phone={phone}
+                onCoverError={probeCovers}
                 currentPath={playback.status.track?.path ?? null}
                 playing={playback.status.state === 'playing'}
                 onPlay={playTrackAt}
@@ -1463,6 +1478,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
           eqOpen={eqOpen}
           queueOpen={queueSheetOpen}
           phone={phone}
+          onCoverError={probeCovers}
           repeat={playback.status.repeat}
           shuffle={playback.status.shuffle}
           onToggle={togglePlayback}

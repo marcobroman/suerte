@@ -11,6 +11,12 @@ export interface CoverArtProps {
   readonly eager?: boolean
   /** Lets CSS size the tile, for responsive grids instead of a fixed square. */
   readonly fill?: boolean
+  /**
+   * Fired when the image fails to load. Tags report no status, so callers
+   * that can tell auth-death from a missing file (the phone backend's
+   * auth probe) pass it here; everyone else omits it.
+   */
+  readonly onError?: () => void
 }
 
 /**
@@ -23,7 +29,8 @@ export function CoverArt({
   alt = '',
   rounded = false,
   eager = false,
-  fill = false
+  fill = false,
+  onError
 }: CoverArtProps) {
   const ref = useRef<HTMLDivElement | null>(null)
   const [visible, setVisible] = useState(eager)
@@ -61,10 +68,15 @@ export function CoverArt({
   const box = fill ? undefined : { width: size, height: size }
   const classes = ['cover']
   if (fill) classes.push('cover-fill')
-  // A resolvable URL can still 404 (remote covers); fall back instead of
-  // showing a broken image. Reset per path so stale failures never stick.
+  // A resolvable URL can still fail (remote covers, dead credentials); fall
+  // back instead of showing a broken image. Reset per path so stale failures
+  // never stick. Auth-death is reported out for backends that can route it.
   const art = url && !failed ? url : null
   if (art) classes.push('has-art')
+  const handleError = (): void => {
+    setFailed(true)
+    onError?.()
+  }
 
   return (
     <div
@@ -77,7 +89,7 @@ export function CoverArt({
         <img
           src={art}
           alt={alt}
-          onError={() => setFailed(true)}
+          onError={handleError}
           {...(fill ? {} : { width: size, height: size })}
         />
       ) : (

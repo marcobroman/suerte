@@ -21,6 +21,8 @@ export interface SidebarProps {
   readonly navOpen: boolean
   /** Phone client: folder management stays hidden. */
   readonly phone: boolean
+  /** Fired when an artist image fails (lets the phone probe a dead credential). */
+  readonly onCoverError?: () => void
   onSelect(selection: Selection): void
   onRemoveRoot(path: string): void
 }
@@ -40,7 +42,8 @@ export function Sidebar({
   onRemoveRoot,
   query,
   navOpen,
-  phone
+  phone,
+  onCoverError
 }: SidebarProps) {
   const activeArtist = selection.kind === 'artist' ? selection.artist : null
   const activeAlbumKey = selection.kind === 'album' ? selection.albumKey : null
@@ -84,7 +87,7 @@ export function Sidebar({
               onClick={() => onSelect({ kind: 'artist', artist: artist.name })}
               title={artist.name}
             >
-              <CoverArt path={coverPathForAlbum(first)} size={28} alt="" rounded />
+              <CoverArt path={coverPathForAlbum(first)} size={28} alt="" rounded onError={onCoverError} />
               <span className="nav-text">{artist.name}</span>
             </button>
           )

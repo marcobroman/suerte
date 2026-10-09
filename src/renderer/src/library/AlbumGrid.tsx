@@ -8,6 +8,8 @@ export interface AlbumGridProps {
   readonly query: string
   /** Phone client: desktop-only actions stay hidden. */
   readonly phone: boolean
+  /** Fired when a tile image fails (lets the phone probe a dead credential). */
+  readonly onCoverError?: () => void
   onOpen(album: Album): void
   onPlay(album: Album): void
   onQueueNext(album: Album): void
@@ -16,7 +18,7 @@ export interface AlbumGridProps {
 }
 
 /** Card grid of album tiles, the shape a music library is normally browsed in. */
-export function AlbumGrid({ albums, query, phone, onOpen, onPlay, onQueueNext, onQueueLast, onAutoTag }: AlbumGridProps) {
+export function AlbumGrid({ albums, query, phone, onCoverError, onOpen, onPlay, onQueueNext, onQueueLast, onAutoTag }: AlbumGridProps) {
   if (albums.length === 0) {
     return (
       <p className="empty">
@@ -40,7 +42,7 @@ export function AlbumGrid({ albums, query, phone, onOpen, onPlay, onQueueNext, o
               aria-label={`Open ${album.title}`}
             >
               <span className="card-art">
-                <CoverArt path={coverPathForAlbum(album)} size={0} alt="" fill />
+                <CoverArt path={coverPathForAlbum(album)} size={0} alt="" fill onError={onCoverError} />
               </span>
               <span className="card-title">{album.title}</span>
               <span className="card-sub">

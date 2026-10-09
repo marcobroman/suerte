@@ -12,6 +12,8 @@ export interface AlbumViewProps {
   readonly playing: boolean
   /** Phone client: desktop-only actions stay hidden. */
   readonly phone: boolean
+  /** Fired when the hero image fails (lets the phone probe a dead credential). */
+  readonly onCoverError?: () => void
   onPlay(index: number): void
   onPlayAll(): void
   onAddNext(index: number): void
@@ -31,6 +33,7 @@ export function AlbumView({
   currentPath,
   playing,
   phone,
+  onCoverError,
   onPlay,
   onPlayAll,
   onAddNext,
@@ -46,7 +49,7 @@ export function AlbumView({
   return (
     <div className="album-view">
       <header className="album-hero">
-        <CoverArt path={coverPathForAlbum(album)} size={176} alt={`${album.title} cover`} eager />
+        <CoverArt path={coverPathForAlbum(album)} size={176} alt={`${album.title} cover`} eager onError={onCoverError} />
         <div className="album-hero-text">
           <p className="album-eyebrow">Album</p>
           <h1>{album.title}</h1>

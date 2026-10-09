@@ -621,10 +621,13 @@ describe('library server', () => {
   it('expires sessions past their absolute or idle lifetime', async () => {
     const now = Date.now()
     const day = 24 * 60 * 60 * 1000
+    const hour = 60 * 60 * 1000
     await start([
       { id: 'fresh', createdAt: now, lastSeen: now },
       { id: 'old-absolute', createdAt: now - 31 * day, lastSeen: now },
-      { id: 'old-idle', createdAt: now, lastSeen: now - 8 * day }
+      { id: 'old-idle', createdAt: now, lastSeen: now - 8 * day },
+      { id: 'day-old-idle', createdAt: now - 2 * day, lastSeen: now - 25 * hour },
+      { id: 'day-old-active', createdAt: now - 2 * day, lastSeen: now - 23 * hour }
     ])
 
     expect((await fetch(`${base}/api/library`, { headers: { cookie: 'onda_session=fresh' } })).status).toBe(
@@ -636,6 +639,12 @@ describe('library server', () => {
     expect(
       (await fetch(`${base}/api/library`, { headers: { cookie: 'onda_session=old-idle' } })).status
     ).toBe(401)
+    expect(
+      (await fetch(`${base}/api/library`, { headers: { cookie: 'onda_session=day-old-idle' } })).status
+    ).toBe(401)
+    expect(
+      (await fetch(`${base}/api/library`, { headers: { cookie: 'onda_session=day-old-active' } })).status
+    ).toBe(200)
   })
 
   it('expires idle devices, including at the session handshake', async () => {
@@ -653,6 +662,21 @@ describe('library server', () => {
     })
     expect(handshake.status).toBe(401)
     expect(handshake.headers.get('set-cookie')).toBeNull()
+  })
+
+  it('expires devices past their absolute lifetime even when active', async () => {
+    const now = Date.now()
+    const day = 24 * 60 * 60 * 1000
+    await start(
+      [],
+      [
+        { token: 'old-but-active', name: 'Old', createdAt: now - 181 * day, lastSeen: now },
+        { token: 'almost-old', name: 'Aged', createdAt: now - 179 * day, lastSeen: now }
+      ]
+    )
+
+    expect((await fetch(`${base}/api/library?token=old-but-active`)).status).toBe(401)
+    expect((await fetch(`${base}/api/library?token=almost-old`)).status).toBe(200)
   })
 
   it('logs out a session cookie and kills it', async () => {
