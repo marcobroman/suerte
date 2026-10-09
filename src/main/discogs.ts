@@ -35,6 +35,38 @@ const DEFAULT_THROTTLE_MS = 1100
 /** Largest cover download accepted into memory (8 MB). */
 const MAX_DISCOGS_ART_BYTES = 8 * 1024 * 1024
 
+/**
+ * Reads a response body up to a cap: over-cap bodies abort mid-stream with
+ * an error instead of buffering fully before rejection.
+ */
+async function readCappedBody(response: Response, maxBytes: number): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array(await response.arrayBuffer())
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.length
+    if (total > maxBytes) {
+      try {
+        await reader.cancel()
+      } catch {
+        // Already closed; the cap did its job.
+      }
+      throw new DiscogsError('network', 'That cover art is too large.')
+    }
+    chunks.push(value)
+  }
+  const merged = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.length
+  }
+  return merged
+}
+
 /** Shared across instances so rapid successive dialogs stay under the limit. */
 let lastCallAt = 0
 
@@ -254,10 +286,9 @@ export function createDiscogsClient(options: DiscogsClientOptions): DiscogsClien
         if (Number.isFinite(announced) && announced > MAX_DISCOGS_ART_BYTES) {
           throw new DiscogsError('network', 'That cover art is too large.')
         }
-        const data = new Uint8Array(await response.arrayBuffer())
-        if (data.length > MAX_DISCOGS_ART_BYTES) {
-          throw new DiscogsError('network', 'That cover art is too large.')
-        }
+        // Stream with an incremental cap: a lied content-length must not
+        // buffer unboundedly (readCappedBody aborts mid-stream instead).
+        const data = await readCappedBody(response, MAX_DISCOGS_ART_BYTES)
         const mime = normalizeCoverMime((response.headers.get('content-type') ?? '').split(';')[0] ?? '')
         if (!mime) throw new DiscogsError('network', 'That URL is not a supported image.')
         return { mime, data }

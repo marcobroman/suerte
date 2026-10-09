@@ -78,11 +78,12 @@ function Root() {
         initialPairingCode={pairFromHash(window.location.hash)}
         initialFingerprint={fingerprintFromHash(window.location.hash)}
         notice={logoutNotice}
-        onConnect={(baseUrl, token) => {
-          const fingerprint = fingerprintFromHash(window.location.hash)
-          saveServerCredentials(window.localStorage, { baseUrl, token, fingerprint })
+        onConnect={(baseUrl, token, adopted) => {
+          // Persist the probe's adopted fingerprint (or the link's): saved
+          // trust stays bound instead of re-trusting blind every launch.
+          saveServerCredentials(window.localStorage, { baseUrl, token, fingerprint: adopted })
           setLogoutNotice(null)
-          setPhoneBackend(new HttpBackend(baseUrl, token, window.localStorage, fingerprint))
+          setPhoneBackend(new HttpBackend(baseUrl, token, window.localStorage, adopted))
         }}
       />
     )

@@ -383,8 +383,13 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
     } catch {
       // persistConfig below rewrites the same emptied state regardless.
     }
-    await context.server?.dropDevices()
-    context.server?.dropMasterSubscribers()
+    // Drops first, persist second — and the master-subscriber drop cannot be
+    // skipped by a persistence failure between them.
+    try {
+      await context.server?.dropDevices()
+    } finally {
+      context.server?.dropMasterSubscribers()
+    }
     await persistConfig()
     return settingsOf(context)
   })

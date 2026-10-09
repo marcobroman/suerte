@@ -299,6 +299,14 @@ export class HttpBackend implements Backend {
   }
 
   /**
+   * The currently pinned fingerprint: the link's, or the server's once a
+   * session adopted it. Lets callers persist trust the probe established.
+   */
+  get serverFingerprint(): string | null {
+    return this.#expectedFingerprint
+  }
+
+  /**
    * Logs in and stores the session cookie. Concurrent callers share one
    * handshake; a failure clears the flight so the next call retries instead
    * of caching a dead login. Throws when the token is wrong or the server

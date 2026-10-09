@@ -30,7 +30,7 @@ export interface PhoneBootProps {
   readonly initialFingerprint: string | null
   /** Why the boot screen returned (e.g. after a logout); shown once. */
   readonly notice: string | null
-  onConnect(baseUrl: string, token: string): void
+  onConnect(baseUrl: string, token: string, fingerprint: string | null): void
 }
 
 /**
@@ -90,9 +90,11 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
     try {
       const trimmedBase = baseUrl.trim()
       const trimmedToken = token.trim()
-      const probe = new HttpBackend(trimmedBase, trimmedToken, window.localStorage)
+      // The probe verifies identity before transmitting the token; the
+      // adopted fingerprint flows to onConnect so saved trust is bound.
+      const probe = new HttpBackend(trimmedBase, trimmedToken, window.localStorage, fingerprint)
       await probe.getLibrary()
-      onConnect(trimmedBase, trimmedToken)
+      onConnect(trimmedBase, trimmedToken, probe.serverFingerprint)
     } catch {
       setError('Could not reach the server — check the address and token.')
     } finally {
@@ -106,9 +108,9 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
     try {
       const trimmedBase = baseUrl.trim()
       const deviceToken = await exchangePairingCode(trimmedBase, pairingCode, deviceName, fingerprint)
-      const probe = new HttpBackend(trimmedBase, deviceToken, window.localStorage)
+      const probe = new HttpBackend(trimmedBase, deviceToken, window.localStorage, fingerprint)
       await probe.getLibrary()
-      onConnect(trimmedBase, deviceToken)
+      onConnect(trimmedBase, deviceToken, probe.serverFingerprint)
     } catch (error: unknown) {
       setError(error instanceof Error ? error.message : 'Pairing failed.')
     } finally {

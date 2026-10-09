@@ -238,4 +238,22 @@ describe('createDiscogsClient', () => {
       kind: 'network'
     })
   })
+
+  it('aborts dripped bodies that outgrow the cap mid-stream', async () => {
+    const dripping = createDiscogsClient({
+      token: 't',
+      throttleMs: 0,
+      fetchImpl: stubFetch(
+        () =>
+          new Response('x'.repeat(9 * 1024 * 1024), {
+            headers: { 'content-type': 'image/jpeg' }
+          })
+      ) as unknown as typeof fetch
+    })
+
+    // No content-length announced: the incremental cap still stops it.
+    await expect(dripping.fetchArt('https://i.discogs.com/drip.jpg')).rejects.toMatchObject({
+      kind: 'network'
+    })
+  })
 })
