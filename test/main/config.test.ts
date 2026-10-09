@@ -11,7 +11,29 @@ import {
   normalizeRoots,
   saveConfig
 } from '@main/config'
+import type { SecretBox } from '@main/secrets'
 import { DEFAULT_SERVER_PORT, DEFAULT_THEME } from '@shared/types'
+
+/** Stand-in vault: base64 envelopes instead of OS encryption. */
+const envelopeBox: SecretBox = {
+  available: () => true,
+  protect: (plaintext) => ({ enc: Buffer.from(plaintext, 'utf8').toString('base64') }),
+  unprotect: (value) => {
+    if (typeof value === 'string') return value
+    return Buffer.from(value.enc, 'base64').toString('utf8')
+  }
+}
+
+/** Locked vault: everything secret fails, nothing is readable or writable. */
+const lockedBox: SecretBox = {
+  available: () => false,
+  protect: () => {
+    throw new Error('vault locked')
+  },
+  unprotect: () => {
+    throw new Error('vault locked')
+  }
+}
 
 describe('normalizeRoots', () => {
   it('keeps order and trims whitespace', () => {
@@ -338,5 +360,212 @@ describe('config', () => {
       roots: ['/legacy'],
       theme: DEFAULT_THEME
     })
+  })
+})
+
+describe('secret envelopes', () => {
+  let dir = ''
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'config-env-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('round-trips secrets through envelopes with nothing in the clear', async () => {
+    await saveConfig(
+      dir,
+      {
+        roots: ['/music'],
+        discogsToken: 'discogs-secret',
+        server: {
+          enabled: true,
+          port: 5000,
+          token: 'server-secret',
+          allowInsecure: false,
+          sessions: [{ id: 'session-secret', createdAt: 10, lastSeen: 20 }],
+          devices: [{ token: 'device-secret', name: 'Phone', createdAt: 10, lastSeen: 20 }]
+        }
+      },
+      envelopeBox
+    )
+
+    const raw = await readFile(configPath(dir), 'utf8')
+    expect(raw).not.toContain('server-secret')
+    expect(raw).not.toContain('discogs-secret')
+    expect(raw).not.toContain('session-secret')
+    expect(raw).not.toContain('device-secret')
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const server = parsed['server'] as Record<string, unknown>
+    expect(server['token']).toEqual({ enc: expect.any(String) })
+
+    const loaded = await loadConfig(dir, envelopeBox)
+    expect(loaded.discogsToken).toBe('discogs-secret')
+    expect(loaded.server?.token).toBe('server-secret')
+    expect(loaded.server?.sessions).toEqual([{ id: 'session-secret', createdAt: 10, lastSeen: 20 }])
+    expect(loaded.server?.devices).toEqual([
+      { token: 'device-secret', name: 'Phone', createdAt: 10, lastSeen: 20 }
+    ])
+  })
+
+  it('reads legacy plaintext files and rewrites them as envelopes', async () => {
+    await saveConfig(dir, {
+      roots: ['/music'],
+      server: {
+        enabled: true,
+        port: 5000,
+        token: 'legacy-secret',
+        allowInsecure: false,
+        sessions: [],
+        devices: []
+      }
+    })
+
+    // Legacy file loads fine through the vault box (shape check, no version).
+    expect((await loadConfig(dir, envelopeBox)).server?.token).toBe('legacy-secret')
+
+    // Next save overwrites in the new shape; the secret never appears bare.
+    await saveConfig(
+      dir,
+      { roots: ['/music'], server: (await loadConfig(dir, envelopeBox)).server },
+      envelopeBox
+    )
+    const raw = await readFile(configPath(dir), 'utf8')
+    expect(raw).not.toContain('legacy-secret')
+    expect((await loadConfig(dir, envelopeBox)).server?.token).toBe('legacy-secret')
+  })
+
+  it('drops envelope secrets instead of crashing when the vault is locked', async () => {
+    await saveConfig(
+      dir,
+      {
+        roots: ['/music'],
+        discogsToken: 'discogs-secret',
+        server: {
+          enabled: true,
+          port: 5000,
+          token: 'server-secret',
+          allowInsecure: false,
+          sessions: [{ id: 'session-secret', createdAt: 10, lastSeen: 20 }],
+          devices: []
+        }
+      },
+      envelopeBox
+    )
+
+    const loaded = await loadConfig(dir, lockedBox)
+    expect(loaded.roots).toEqual(['/music'])
+    expect(loaded.discogsToken).toBeUndefined()
+    expect(loaded.server?.token).toBeUndefined()
+    expect(loaded.server?.sessions).toEqual([])
+    expect(loaded.server?.port).toBe(5000)
+  })
+
+  it('writes nothing rather than a secret-less file when locked', async () => {
+    const returned = await saveConfig(
+      dir,
+      {
+        roots: ['/music'],
+        server: {
+          enabled: true,
+          port: 5000,
+          token: 'server-secret',
+          allowInsecure: false,
+          sessions: [],
+          devices: []
+        }
+      },
+      lockedBox
+    )
+
+    // In-memory result is unaffected (the app keeps running on it); with no
+    // sealed file to preserve and no sealable secrets, nothing hits disk.
+    expect(returned.server?.token).toBe('server-secret')
+    await expect(readFile(configPath(dir), 'utf8')).rejects.toThrow()
+  })
+
+  it('drops malformed envelopes rather than trusting them', async () => {
+    await writeFile(
+      configPath(dir),
+      JSON.stringify({
+        version: 1,
+        roots: [],
+        server: {
+          enabled: true,
+          port: 5000,
+          token: { enc: 123 },
+          sessions: [{ id: { nope: true }, createdAt: 1, lastSeen: 1 }]
+        }
+      }),
+      'utf8'
+    )
+
+    const loaded = await loadConfig(dir, envelopeBox)
+    expect(loaded.server?.token).toBeUndefined()
+    expect(loaded.server?.sessions).toEqual([])
+  })
+
+  it('skips the write rather than persisting a secret-less file', async () => {
+    // First a sealed file, then a locked-vault save: the file must keep
+    // its envelopes instead of being overwritten secret-less.
+    await saveConfig(
+      dir,
+      {
+        roots: ['/music'],
+        server: {
+          enabled: true,
+          port: 5000,
+          token: 'server-secret',
+          allowInsecure: false,
+          sessions: [],
+          devices: []
+        }
+      },
+      envelopeBox
+    )
+    const before = await readFile(configPath(dir), 'utf8')
+
+    await saveConfig(
+      dir,
+      {
+        roots: ['/music', '/more'],
+        server: {
+          enabled: true,
+          port: 5000,
+          token: 'server-secret',
+          allowInsecure: false,
+          sessions: [],
+          devices: []
+        }
+      },
+      lockedBox
+    )
+
+    // Untouched on disk (even the roots change waits), intact in memory.
+    expect(await readFile(configPath(dir), 'utf8')).toBe(before)
+  })
+
+  it('drops over-long secrets instead of persisting them', async () => {
+    const long = 'x'.repeat(2000)
+    await saveConfig(dir, { roots: [], discogsToken: long })
+
+    expect((await loadConfig(dir)).discogsToken).toBeUndefined()
+
+    await writeFile(
+      configPath(dir),
+      JSON.stringify({
+        version: 1,
+        roots: [],
+        server: {
+          enabled: true,
+          port: 5000,
+          sessions: [{ id: long, createdAt: 1, lastSeen: 1 }]
+        }
+      }),
+      'utf8'
+    )
+    expect((await loadConfig(dir)).server?.sessions).toEqual([])
   })
 })

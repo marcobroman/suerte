@@ -63,6 +63,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
     port: DEFAULT_SERVER_PORT,
     tokenSet: false,
     allowInsecure: false,
+    secretsLocked: false,
     url: null,
     urls: [],
     secure: false,
@@ -236,7 +237,11 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
         (settings) => {
           refreshServerState(settings)
           if (next && settings.server.url === null) {
-            setServerMessage('Could not listen — the port may be taken, or the certificate is missing.')
+            setServerMessage(
+              settings.server.secretsLocked
+                ? 'OS keyring unavailable — serving stays off until it unlocks.'
+                : 'Could not listen — the port may be taken, or the certificate is missing.'
+            )
           }
         },
         () => setServerMessage('Could not change the server.')
@@ -1197,6 +1202,13 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
                           />{' '}
                           Allow unencrypted fallback if the certificate fails
                         </label>
+                        {serverState.secretsLocked && (
+                          <p className="settings-note" role="alert">
+                            OS keyring unavailable — the server cannot keep tokens and stays
+                            stopped. Unlock the keyring (or set one up), then toggle
+                            serving off and on again.
+                          </p>
+                        )}
                         <p className="settings-label">Connected devices</p>
                         {serverState.devices.length === 0 ? (
                           <p className="settings-note">

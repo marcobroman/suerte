@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { app, BrowserWindow, shell } from 'electron'
 import { loadConfig, saveConfig, configPath } from './config'
+import { electronSecretBox } from './secrets'
 import { ensureServerCert } from './cert'
 import { createIpcContext, registerIpc, rescan } from './ipc'
 import { createLibraryServer, selectServerTransport } from './server'
@@ -11,7 +12,7 @@ import { readCoverDataUrl } from './library/covers'
 
 // Resolved eagerly because app.getPath is unavailable until the app is ready.
 const userDataDir = app.getPath('userData')
-const ipcContext = createIpcContext(userDataDir)
+const ipcContext = createIpcContext(userDataDir, electronSecretBox())
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
@@ -62,8 +63,11 @@ app.whenReady().then(async () => {
   }
 
   // Folders chosen in an earlier session are restored, then rescanned in the
-  // background, so launching the app lands straight on the library.
-  const config = await loadConfig(userDataDir)
+  // background, so launching the app lands straight on the library. Secrets
+  // open through the OS vault supplied at context creation; without one they
+  // stay absent (never plaintext on disk from this build on) and the server
+  // waits for it.
+  const config = await loadConfig(userDataDir, ipcContext.secrets)
   ipcContext.roots = [...config.roots]
   ipcContext.theme = config.theme
   ipcContext.discogsToken = config.discogsToken
@@ -84,7 +88,7 @@ app.whenReady().then(async () => {
         sessions: [...ipcContext.serverConfig.sessions],
         devices: ipcContext.serverConfig.devices.map((device) => ({ ...device }))
       }
-    })
+    }, ipcContext.secrets)
   }
 
   ipcContext.server = createLibraryServer({
@@ -123,28 +127,34 @@ app.whenReady().then(async () => {
     }
   })
   if (ipcContext.serverConfig.enabled) {
-    if (ipcContext.serverConfig.token === undefined) {
-      ipcContext.serverConfig = {
-        ...ipcContext.serverConfig,
-        token: randomBytes(32).toString('hex')
-      }
-      await persistServerState()
-    }
-    try {
-      ipcContext.serverTls = await ensureServerCert(userDataDir)
-    } catch {
-      // No identity: fail closed below unless the user allowed insecure.
-      ipcContext.serverTls = null
-    }
-    if (selectServerTransport(ipcContext.serverTls, ipcContext.serverConfig.allowInsecure) === 'disabled') {
-      // Enabled but certless and no fallback: stays stopped with a null URL,
-      // and the next enable retries. Nothing else about startup depends on it.
+    if (!ipcContext.secrets.available()) {
+      // No vault, no server: there is nowhere safe to mint or keep a token,
+      // so enabled stays remembered-but-stopped until one unlocks. The UI
+      // reads secretsLocked from settings and explains why.
     } else {
+      if (ipcContext.serverConfig.token === undefined) {
+        ipcContext.serverConfig = {
+          ...ipcContext.serverConfig,
+          token: randomBytes(32).toString('hex')
+        }
+        await persistServerState()
+      }
       try {
-        await ipcContext.server.start()
+        ipcContext.serverTls = await ensureServerCert(userDataDir)
       } catch {
-        // A taken port at launch leaves the server stopped; enabling it again
-        // later retries. Nothing else about startup depends on it.
+        // No identity: fail closed below unless the user allowed insecure.
+        ipcContext.serverTls = null
+      }
+      if (selectServerTransport(ipcContext.serverTls, ipcContext.serverConfig.allowInsecure) === 'disabled') {
+        // Enabled but certless and no fallback: stays stopped with a null URL,
+        // and the next enable retries. Nothing else about startup depends on it.
+      } else {
+        try {
+          await ipcContext.server.start()
+        } catch {
+          // A taken port at launch leaves the server stopped; enabling it again
+          // later retries. Nothing else about startup depends on it.
+        }
       }
     }
   }

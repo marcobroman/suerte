@@ -145,7 +145,7 @@ Small preferences and library roots live in `library.json` inside the Electron u
 - app theme
 - Discogs token presence (the token itself never leaves the main process)
 - equalizer curve (master volume stays session-only)
-- LAN server settings (enabled, port, access token, login sessions, paired devices)
+- LAN server settings (enabled, port, access token, login sessions, paired devices — secrets sealed in the OS keyring, never plaintext)
 - TLS certificate (`server-cert.pem` / `server-key.pem` beside `library.json`, generated on first enable)
 
 ## Notes

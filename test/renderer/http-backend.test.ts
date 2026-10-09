@@ -464,7 +464,8 @@ describe('HttpBackend', () => {
       url: 'https://phone:4280',
       urls: ['https://phone:4280'],
       secure: true,
-      fingerprint: null
+      fingerprint: null,
+      secretsLocked: false
     })
   })
 

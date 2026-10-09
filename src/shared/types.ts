@@ -144,6 +144,11 @@ export interface ServerStatus {
   readonly tokenSet: boolean
   /** Reachable base URL while the server runs, else null. */
   readonly url: string | null
+  /**
+   * True when the OS vault is unreachable: the server cannot mint or keep
+   * tokens, so enabling stays remembered-but-stopped until it unlocks.
+   */
+  readonly secretsLocked: boolean
 
   /**
    * Explicit opt-in to serve plain HTTP when the certificate is missing or

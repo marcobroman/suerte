@@ -8,6 +8,7 @@ import { DEFAULT_SERVER_PORT, DEFAULT_THEME, isThemeId, type AppSettings } from 
 import { CoverCache, readCoverDataUrl } from './library/covers'
 import { normalizePersistedEq, normalizeToken, saveConfig } from './config'
 import { ensureServerCert, certCoversIps, localIPv4s, type ServerCert } from './cert'
+import type { SecretBox } from './secrets'
 import { createDiscogsClient, DiscogsError } from './discogs'
 import { LibraryCache } from './library/cache'
 import { findMissingRoots } from './library/roots'
@@ -31,6 +32,8 @@ export interface IpcContext {
   serverConfig: ServerConfig
   /** Running LAN server, if enabled. Owned by main/index.ts lifecycle. */
   server: LibraryServer | null
+  /** Encrypts persisted secrets; plaintext box in tests, vault in prod. */
+  secrets: SecretBox
   /** Live TLS identity for the server; minted on first enable. */
   serverTls: ServerCert | null
   tree: LibraryTree
@@ -42,6 +45,7 @@ export interface IpcContext {
 
 export function createIpcContext(
   configDir: string,
+  secrets: SecretBox,
   roots: readonly string[] = [],
   theme: ThemeId = DEFAULT_THEME
 ): IpcContext {
@@ -55,6 +59,7 @@ export function createIpcContext(
     serverConfig: { enabled: false, port: DEFAULT_SERVER_PORT, token: undefined, sessions: [], devices: [], allowInsecure: false },
     server: null,
     serverTls: null,
+    secrets,
     tree: { artists: [], albums: [] },
     tracks: [],
     cache: new LibraryCache(),
@@ -140,6 +145,9 @@ function settingsOf(context: IpcContext): AppSettings {
       port: context.serverConfig.port,
       tokenSet: context.serverConfig.token !== undefined,
       allowInsecure: context.serverConfig.allowInsecure,
+      // The OS vault gates the server, not just the file: with no vault
+      // there is nowhere safe to mint or keep a token.
+      secretsLocked: !context.secrets.available(),
       url: running
         ? (lanBaseUrl(context.serverConfig.port, tls.secure) ??
           `${tls.secure ? 'https' : 'http'}://localhost:${context.serverConfig.port}`)
@@ -206,7 +214,7 @@ export function registerIpc(context: IpcContext): void {
       discogsToken: context.discogsToken,
       eq: context.eq,
       server: serverConfigOf(context)
-    })
+    }, context.secrets)
 
   ipcMain.handle(IPC.pickFolders, async () => {
     const result = await dialog.showOpenDialog({
@@ -252,7 +260,7 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
   })
 
   ipcMain.handle(IPC.setDiscogsToken, async (_event, token: unknown): Promise<AppSettings> => {
-    context.discogsToken = normalizeToken(token)
+    context.discogsToken = normalizeToken(token, context.secrets)
     await persistConfig()
     return settingsOf(context)
   })
@@ -270,10 +278,18 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
   ipcMain.handle(IPC.setServerEnabled, async (_event, on: unknown): Promise<AppSettings> => {
     if (typeof on !== 'boolean') return settingsOf(context)
     context.serverConfig = { ...context.serverConfig, enabled: on }
-    if (on && context.serverConfig.token === undefined) {
+    // No vault, no mint: a token that cannot be persisted would vanish on
+    // quit anyway, and persisting it is impossible — leave it absent.
+    if (on && context.serverConfig.token === undefined && context.secrets.available()) {
       context.serverConfig = { ...context.serverConfig, token: randomBytes(32).toString('hex') }
     }
     await persistConfig()
+    // No vault, no server: tokens cannot be minted or kept safely, so the
+    // enabled flag is remembered but nothing listens. settingsOf reports
+    // secretsLocked and the UI explains why.
+    if (on && !context.secrets.available()) {
+      return settingsOf(context)
+    }
     if (on) {
       // The TLS identity is minted before the first listen so the server
       // never serves plain HTTP in production. If generation fails the

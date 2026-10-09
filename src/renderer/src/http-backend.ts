@@ -527,6 +527,7 @@ export class HttpBackend implements Backend {
         port: DEFAULT_SERVER_PORT,
         tokenSet: true,
         allowInsecure: false,
+        secretsLocked: false,
         url: this.#baseUrl,
         urls: [this.#baseUrl],
         // The phone trusts at the platform level (system trust prompt on
