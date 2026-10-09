@@ -1,8 +1,9 @@
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { app, BrowserWindow, shell } from 'electron'
-import { loadConfig, saveConfig } from './config'
+import { loadConfig, saveConfig, configPath } from './config'
 import { ensureServerCert } from './cert'
 import { createIpcContext, registerIpc, rescan } from './ipc'
 import { createLibraryServer, selectServerTransport } from './server'
@@ -52,6 +53,14 @@ function createWindow(): BrowserWindow {
 app.whenReady().then(async () => {
   registerIpc(ipcContext)
 
+  // A crash between config write and rename leaves library.json.tmp holding
+  // secrets; it is never read back, so remove it on every launch.
+  try {
+    await rm(configPath(userDataDir) + '.tmp', { force: true })
+  } catch {
+    // Best effort: a leftover tmp is inert (never loaded).
+  }
+
   // Folders chosen in an earlier session are restored, then rescanned in the
   // background, so launching the app lands straight on the library.
   const config = await loadConfig(userDataDir)
@@ -82,6 +91,7 @@ app.whenReady().then(async () => {
     getPort: () => ipcContext.serverConfig.port,
     getToken: () => ipcContext.serverConfig.token,
     getTls: () => ipcContext.serverTls,
+    getAllowInsecure: () => ipcContext.serverConfig.allowInsecure,
     getSessions: () => ipcContext.serverConfig.sessions,
     saveSessions: (sessions) => {
       ipcContext.serverConfig = { ...ipcContext.serverConfig, sessions: [...sessions] }

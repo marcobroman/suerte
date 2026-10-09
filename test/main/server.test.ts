@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import NodeID3 from 'node-id3'
 import { CoverCache, readCoverDataUrl } from '@main/library/covers'
 import { ensureServerCert } from '@main/cert'
-import { clientPathIn, createLibraryServer, insideRoots, lanBaseUrl, lanBaseUrls, selectServerTransport, trackId, type LibraryServer } from '@main/server'
+import { clientPathIn, createLibraryServer, bucketIp, insideRoots, lanBaseUrl, lanBaseUrls, selectServerTransport, trackId, type LibraryServer } from '@main/server'
 import { writeTrackTags } from '@main/library/tags'
 import type { LibrarySummary } from '@shared/ipc'
 import { createPngBytes } from '../helpers'
@@ -44,6 +44,26 @@ describe('insideRoots', () => {
   it('supports roots that are individual files', () => {
     expect(insideRoots(['/music/a.mp3'], '/music/a.mp3')).toBe(true)
     expect(insideRoots(['/music/a.mp3'], '/music/b.mp3')).toBe(false)
+  })
+
+  it.runIf(process.platform === 'win32')('matches case-insensitively on Windows', () => {
+    expect(insideRoots(['C:\\music'], 'c:\\MUSIC\\a.mp3')).toBe(true)
+    expect(insideRoots(['C:\\music'], 'C:\\MUSIC')).toBe(true)
+    expect(insideRoots(['C:\\music'], 'C:\\other\\a.mp3')).toBe(false)
+  })
+})
+describe('bucketIp', () => {
+  const socket = (remoteAddress: string | undefined) =>
+    ({ socket: { remoteAddress } }) as unknown as Parameters<typeof bucketIp>[0]
+
+  it('folds IPv6-mapped IPv4 onto the same bucket', () => {
+    expect(bucketIp(socket('::ffff:192.168.1.5'))).toBe('192.168.1.5')
+    expect(bucketIp(socket('192.168.1.5'))).toBe('192.168.1.5')
+  })
+
+  it('passes through anything else untouched', () => {
+    expect(bucketIp(socket('::1'))).toBe('::1')
+    expect(bucketIp(socket(undefined))).toBe('unknown')
   })
 })
 describe('lanBaseUrls', () => {
@@ -147,6 +167,7 @@ describe('library server', () => {
       getPort: () => 0,
       getToken: () => TOKEN,
       getTls: () => tls,
+      getAllowInsecure: () => true,
       getSessions: () =>
         initial.map((session) => ({
           id: session.id,
@@ -267,10 +288,12 @@ describe('library server', () => {
     expect(response.headers.get('cross-origin-resource-policy')).toBe('same-origin')
   })
 
-  it('caps concurrent event subscribers', async () => {
+  it('keeps serving subscribers under the global cap', async () => {
+    // Same-IP eviction (next test) keeps the total under the global cap, so
+    // one peer alone can never reach the 503 — it just rotates its own
+    // oldest sockets out. This pins that steady state.
     await start()
     const controllers: AbortController[] = []
-    const held: Response[] = []
     try {
       for (let i = 0; i < 20; i++) {
         const controller = new AbortController()
@@ -281,15 +304,79 @@ describe('library server', () => {
           signal: controller.signal
         })
         expect(response.status).toBe(200)
-        held.push(response)
       }
-      const refused = await fetch(`${base}/api/events?token=${TOKEN}`)
-      expect(refused.status).toBe(503)
-      await refused.text()
     } finally {
       for (const controller of controllers) controller.abort()
     }
-    expect(held).toHaveLength(20)
+  })
+
+  it('evicts the oldest same-IP subscriber past the per-IP cap', async () => {
+    await start()
+    const first = await fetch(`${base}/api/events?token=${TOKEN}`, {
+      headers: { accept: 'text/event-stream' }
+    })
+    expect(first.status).toBe(200)
+    const firstBody = first.body
+    if (!firstBody) throw new Error('expected a stream body')
+    const reader = firstBody.getReader()
+    const pending = reader.read()
+
+    const holders: Response[] = []
+    try {
+      for (let i = 0; i < 4; i++) {
+        const response = await fetch(`${base}/api/events?token=${TOKEN}`, {
+          headers: { accept: 'text/event-stream' }
+        })
+        expect(response.status).toBe(200)
+        holders.push(response)
+      }
+      // The fifth subscription evicts the first: its stream ends.
+      const chunk = await pending
+      expect(chunk.done).toBe(true)
+    } finally {
+      await reader.cancel()
+      for (const response of holders) {
+        try {
+          await response.body?.cancel()
+        } catch {
+          // Already closed by eviction or shutdown.
+        }
+      }
+    }
+  })
+
+  it('drops live subscriptions when their device is revoked', async () => {
+    await start()
+    const { code } = server?.issuePairingCode() ?? { code: '' }
+    const paired = await fetch(`${base}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code, name: 'Phone' })
+    })
+    const deviceToken = String(((await paired.json()) as { token?: unknown }).token)
+
+    const events = await fetch(`${base}/api/events?token=${deviceToken}`, {
+      headers: { accept: 'text/event-stream' }
+    })
+    expect(events.status).toBe(200)
+    const body = events.body
+    if (!body) throw new Error('expected a stream body')
+    const pending = body.getReader().read()
+
+    const [device] = server?.getDevices() ?? []
+    expect(await server?.revokeDevice(device?.id ?? '')).toBe(true)
+
+    const chunk = await pending
+    expect(chunk.done).toBe(true)
+  })
+
+  it('serves the fingerprint publicly for trust binding', async () => {
+    await start()
+
+    // No credential needed: the fingerprint is TOFU material, not a secret.
+    const response = await fetch(`${base}/api/fingerprint`)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ fingerprint: null })
   })
 
   it('issues a login cookie for the token and accepts it without any token', async () => {
@@ -789,6 +876,26 @@ describe('library server', () => {
     expect(server?.tlsStatus()).toEqual({ secure: false, fingerprint: null, expiresAt: null })
   })
 
+  it('refuses to start certless without the insecure opt-in', async () => {
+    const certless = createLibraryServer({
+      getPort: () => 0,
+      getToken: () => TOKEN,
+      getTls: () => null,
+      getAllowInsecure: () => false,
+      getSessions: () => [],
+      saveSessions: () => Promise.resolve(),
+      getDevices: () => [],
+      saveDevices: () => Promise.resolve(),
+      getSummary: () => ({ tree: { artists: [], albums: [] }, tracks: [], trackCount: 0, roots: [], missingRoots: [], scanning: false }),
+      readCover: () => Promise.resolve(null),
+      getRoots: () => [],
+      getClientDir: () => null
+    })
+
+    await expect(certless.start()).rejects.toThrow(/insecure fallback is off/)
+    expect(certless.listening).toBe(false)
+  })
+
   it('serves TLS with the configured certificate', async () => {
     const identity = await ensureServerCert(clientDir)
     await server?.stop()
@@ -839,5 +946,28 @@ describe('library server', () => {
 
     expect(status.status).toBe(200)
     expect(status.headers.join(';')).toContain('; Secure')
+
+    const cookie = (status.headers[0] ?? '').split(';')[0] ?? ''
+    const logout = await new Promise<{ status: number; headers: string[] }>((resolve, reject) => {
+      const request = httpsRequest(
+        `${secureBase}/api/logout`,
+        { method: 'POST', rejectUnauthorized: false, headers: { cookie } },
+        (response) => {
+          response.resume()
+          response.on('end', () =>
+            resolve({
+              status: response.statusCode ?? 0,
+              headers: (response.headers['set-cookie'] as string[] | undefined) ?? []
+            })
+          )
+          response.on('error', reject)
+        }
+      )
+      request.on('error', reject)
+      request.end()
+    })
+
+    expect(logout.status).toBe(200)
+    expect(logout.headers.join(';')).toContain('; Secure')
   })
 })

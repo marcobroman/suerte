@@ -21,6 +21,7 @@ export const IPC = {
   setServerEnabled: 'server:set-enabled',
   setServerPort: 'server:set-port',
   setServerInsecure: 'server:set-insecure',
+  restartServer: 'server:restart',
   regenerateServerToken: 'server:regenerate-token',
   regenerateServerCert: 'server:regenerate-cert',
   getServerToken: 'server:get-token',
@@ -99,6 +100,11 @@ export interface IpcApi {
    * effect immediately on a running server. Off fails closed.
    */
   setServerInsecure(on: unknown): Promise<AppSettings>
+  /**
+   * Re-reads the TLS identity (renewing it when the network outgrew the old
+   * one) and restarts serving so the current certificate takes effect.
+   */
+  restartServer(): Promise<AppSettings>
   regenerateServerToken(): Promise<AppSettings>
   /**
    * Rotates the TLS certificate (new fingerprint — phones re-trust once).

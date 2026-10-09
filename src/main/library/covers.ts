@@ -2,6 +2,9 @@ import { parseFile, selectCover } from 'music-metadata'
 
 const MAX_CACHED_COVERS = 64
 
+/** Largest embedded picture accepted into cache or onto the wire (12 MB). */
+export const MAX_COVER_BYTES = 12 * 1024 * 1024
+
 /**
  * Cover MIME allowlist. Embedded pictures come from untrusted file bytes, so
  * anything outside this set (notably `text/html`) is dropped rather than
@@ -65,8 +68,10 @@ export async function readCoverDataUrl(
     const metadata = await parseFile(trackPath, { skipCovers: false })
     const picture = selectCover(metadata.common.picture)
     const mime = picture ? normalizeCoverMime(picture.format) : null
+    // Unbounded pictures balloon the cache and every cover response; refuse
+    // the absurd ones outright (a 12 MB JPEG is already far past artwork).
     const dataUrl =
-      picture && mime
+      picture && mime && picture.data.length <= MAX_COVER_BYTES
         ? `data:${mime};base64,${Buffer.from(picture.data).toString('base64')}`
         : null
     cache.set(trackPath, dataUrl)

@@ -7,7 +7,7 @@ import type { LibraryTree, PersistedEqSettings, ScanResult, ServerConfig, TagWri
 import { DEFAULT_SERVER_PORT, DEFAULT_THEME, isThemeId, type AppSettings } from '@shared/types'
 import { CoverCache, readCoverDataUrl } from './library/covers'
 import { normalizePersistedEq, normalizeToken, saveConfig } from './config'
-import { ensureServerCert, type ServerCert } from './cert'
+import { ensureServerCert, certCoversIps, localIPv4s, type ServerCert } from './cert'
 import { createDiscogsClient, DiscogsError } from './discogs'
 import { LibraryCache } from './library/cache'
 import { findMissingRoots } from './library/roots'
@@ -125,6 +125,12 @@ function settingsOf(context: IpcContext): AppSettings {
   const server = context.server
   const tls = server?.tlsStatus() ?? { secure: false, fingerprint: null, expiresAt: null }
   const running = context.serverConfig.enabled && (server?.listening ?? false)
+  // Live staleness: no timer needed — every settings read re-checks whether
+  // the machine's addresses still fit the serving certificate.
+  const certStale =
+    running &&
+    context.serverTls !== null &&
+    !certCoversIps(context.serverTls.cert, localIPv4s())
   return {
     theme: context.theme,
     discogsTokenSet: context.discogsToken !== undefined,
@@ -142,6 +148,7 @@ function settingsOf(context: IpcContext): AppSettings {
       secure: tls.secure,
       fingerprint: tls.fingerprint,
       certExpiresAt: tls.expiresAt,
+      certStale,
       devices: server?.getDevices() ?? []
     }
   }
@@ -321,10 +328,42 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
     await persistConfig()
     if (context.server?.listening) {
       await context.server.stop()
+      // The port moved but the identity did not; still, never restart into
+      // a transport the policy forbids (fail-closed even here).
+      if (selectServerTransport(context.serverTls, context.serverConfig.allowInsecure) === 'disabled') {
+        return settingsOf(context)
+      }
       try {
         await context.server.start()
       } catch {
         // Same taken-port story as enabling: stopped with a null URL.
+      }
+    }
+    return settingsOf(context)
+  })
+
+  ipcMain.handle(IPC.restartServer, async (): Promise<AppSettings> => {
+    // Re-reads the identity — renewing it when the network outgrew the old
+    // one — then restarts serving so the current certificate takes effect.
+    // Renewal changes the fingerprint phones must re-confirm; the UI says so.
+    if (context.serverConfig.enabled) {
+      try {
+        context.serverTls = await ensureServerCert(context.configDir)
+      } catch {
+        context.serverTls = null
+      }
+    }
+    if (context.server?.listening) {
+      await context.server.stop()
+    }
+    if (
+      context.serverConfig.enabled &&
+      selectServerTransport(context.serverTls, context.serverConfig.allowInsecure) !== 'disabled'
+    ) {
+      try {
+        await context.server?.start()
+      } catch {
+        // Taken port: stopped with a null URL.
       }
     }
     return settingsOf(context)
@@ -339,7 +378,11 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
       sessions: [],
       devices: []
     }
-    context.server?.dropSessions()
+    try {
+      await context.server?.dropSessions()
+    } catch {
+      // persistConfig below rewrites the same emptied state regardless.
+    }
     await context.server?.dropDevices()
     await persistConfig()
     return settingsOf(context)

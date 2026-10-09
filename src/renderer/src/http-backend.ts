@@ -42,6 +42,11 @@ const SERVER_CREDS_KEY = 'onda.phone.server'
 export interface ServerCredentials {
   readonly baseUrl: string
   readonly token: string
+  /**
+   * Pinned server fingerprint from trust-on-first-use; null for legacy
+   * entries and plain-HTTP servers. Adopted on first verified session.
+   */
+  readonly fingerprint: string | null
 }
 
 /** Remembered phone connection; null when never connected or hand-edited badly. */
@@ -58,7 +63,12 @@ export function loadServerCredentials(storage: KeyValueStorage): ServerCredentia
   const record = parsed as Record<string, unknown>
   if (typeof record['baseUrl'] !== 'string' || typeof record['token'] !== 'string') return null
   if (record['baseUrl'] === '' || record['token'] === '') return null
-  return { baseUrl: record['baseUrl'], token: record['token'] }
+  const fingerprint = record['fingerprint']
+  return {
+    baseUrl: record['baseUrl'],
+    token: record['token'],
+    fingerprint: typeof fingerprint === 'string' && fingerprint !== '' ? fingerprint : null
+  }
 }
 
 export function saveServerCredentials(storage: KeyValueStorage, creds: ServerCredentials): void {
@@ -207,6 +217,19 @@ export class LoggedOutError extends Error {
 }
 
 /**
+ * Thrown when the server's fingerprint no longer matches pinned trust: a
+ * changed certificate, a downgrade to HTTP, or an impostor. Unlike a wrong
+ * token or a dead server, re-pairing is only safe after the user recognizes
+ * the change — callers route back to boot instead of retrying.
+ */
+export class ServerIdentityChangedError extends Error {
+  constructor() {
+    super('This server looks different than the one this phone trusts — continue only if you recognize the change.')
+    this.name = 'ServerIdentityChangedError'
+  }
+}
+
+/**
  * Backend implementation that talks to the LAN server over HTTP. Covers are
  * same-origin endpoint URLs (the served page is same-origin, so they satisfy
  * the content-security policy).
@@ -226,13 +249,22 @@ export class HttpBackend implements Backend {
   readonly #baseUrl: string
   readonly #token: string
   readonly #storage: KeyValueStorage
+  #expectedFingerprint: string | null
   #sessionReady = false
   #sessionFlight: Promise<void> | null = null
+  #lastAuthProbe = 0
+  /**
+   * Fired when this backend learns the device is logged out or facing a
+   * changed server identity (mid-life expiry, revoke, mismatch). Assigned by
+   * the phone root; media/stream/SSE surfaces cannot route to boot alone.
+   */
+  onLoggedOut: (() => void) | null = null
 
-  constructor(baseUrl: string, token: string, storage: KeyValueStorage) {
+  constructor(baseUrl: string, token: string, storage: KeyValueStorage, expectedFingerprint: string | null = null) {
     this.#baseUrl = baseUrl.replace(/\/+$/, '')
     this.#token = token
     this.#storage = storage
+    this.#expectedFingerprint = expectedFingerprint
   }
 
   get baseUrl(): string {
@@ -245,6 +277,11 @@ export class HttpBackend implements Backend {
    * of caching a dead login. Throws when the token is wrong or the server
    * is unreachable — callers fail loudly rather than silently falling back
    * to tokens in URLs.
+   *
+   * After the handshake the public fingerprint endpoint binds saved trust:
+   * a mismatch with the pinned fingerprint throws ServerIdentityChangedError
+   * (possible impostor — never retry silently), while a first sighting
+   * adopts the fingerprint into stored credentials.
    */
   async startSession(): Promise<void> {
     if (this.#sessionReady) return
@@ -256,6 +293,21 @@ export class HttpBackend implements Backend {
             headers: this.#headers()
           })
         )
+        const identity = await readJson<{ fingerprint?: unknown }>(
+          await fetch(`${this.#baseUrl}/api/fingerprint`)
+        )
+        const actual = typeof identity.fingerprint === 'string' ? identity.fingerprint : null
+        if (this.#expectedFingerprint !== null && actual !== this.#expectedFingerprint) {
+          throw new ServerIdentityChangedError()
+        }
+        if (this.#expectedFingerprint === null && actual !== null) {
+          this.#expectedFingerprint = actual
+          saveServerCredentials(this.#storage, {
+            baseUrl: this.#baseUrl,
+            token: this.#token,
+            fingerprint: actual
+          })
+        }
         this.#sessionReady = true
       })()
       // Clearing the flight must never surface as its own rejection: awaiters
@@ -291,22 +343,61 @@ export class HttpBackend implements Backend {
   }
 
   async #get<T>(path: string, params: Record<string, string> = {}): Promise<T> {
-    await this.startSession()
+    try {
+      await this.startSession()
+    } catch (error: unknown) {
+      this.noteIfLoggedOut(error)
+      throw error
+    }
     const response = await fetch(this.#url(path, params), { headers: this.#headers() })
     if (response.status !== 401) return readJson<T>(response)
     // The cookie may have died server-side (expiry or revoke) while this
     // client still believed it was logged in: one silent re-login, then
     // replay the request. A 401 here proves the server is reachable, so a
     // failed re-handshake means the device itself is gone — logged out.
-    this.#sessionReady = false
     try {
-      await this.startSession()
+      await this.revalidateSession()
     } catch {
-      throw new LoggedOutError()
+      throw this.loggedOut()
     }
     const retry = await fetch(this.#url(path, params), { headers: this.#headers() })
-    if (retry.status === 401) throw new LoggedOutError()
+    if (retry.status === 401) throw this.loggedOut()
     return readJson<T>(retry)
+  }
+
+  /**
+   * Drops the believed session and logs in again. Used after a 401 and by
+   * status-less surfaces (media elements, EventSource) that cannot tell a
+   * dead credential from a network blip.
+   */
+  async revalidateSession(): Promise<void> {
+    this.#sessionReady = false
+    await this.startSession()
+  }
+
+  /**
+   * Called when a tag or socket fails without an HTTP status: re-checks
+   * auth (debounced) and routes genuine logouts to boot. Transient blips
+   * just refresh the session; status-less failures otherwise stay silent.
+   */
+  probeAuthAfterFailure(): void {
+    const now = Date.now()
+    if (now - this.#lastAuthProbe < 30_000) return
+    this.#lastAuthProbe = now
+    void this.revalidateSession().then(undefined, (error: unknown) => this.noteIfLoggedOut(error))
+  }
+
+  /** Routes login-death to boot; returns the error for throw sites. */
+  private loggedOut(): LoggedOutError {
+    this.onLoggedOut?.()
+    return new LoggedOutError()
+  }
+
+  /** Routes foreign login-death errors (handshake, probes) to boot. */
+  private noteIfLoggedOut(error: unknown): void {
+    if (error instanceof LoggedOutError || error instanceof ServerIdentityChangedError) {
+      this.onLoggedOut?.()
+    }
   }
 
   /**
@@ -376,6 +467,7 @@ export class HttpBackend implements Backend {
         secure: this.#baseUrl.startsWith('https:'),
         fingerprint: null,
         certExpiresAt: null,
+        certStale: false,
         devices: []
       }
     }
@@ -417,6 +509,10 @@ export class HttpBackend implements Backend {
     throw unsupported('Server settings')
   }
 
+  async restartServer(): Promise<AppSettings> {
+    throw unsupported('Server settings')
+  }
+
   async regenerateServerToken(): Promise<AppSettings> {
     throw unsupported('Server settings')
   }
@@ -442,7 +538,7 @@ export class HttpBackend implements Backend {
   }
 
   async readFile(path: string): Promise<ArrayBuffer> {
-    const response = await fetch(this.#url('/api/stream', { path }), { headers: this.#headers() })
+    const response = await fetch(this.#url('/api/stream', { id: path }), { headers: this.#headers() })
     if (!response.ok) throw new Error(`Request failed (${response.status}).`)
     return response.arrayBuffer()
   }
@@ -450,7 +546,9 @@ export class HttpBackend implements Backend {
   async readCover(path: string): Promise<string | null> {
     // Same-origin endpoint URL: the image tag streams it with ?id=, since
     // tags cannot send headers. Broken links surface through the <img> error
-    // fallback rather than here.
+    // fallback rather than here — and tags report no status, so a dead
+    // credential on covers stays silent by browser design (accepted: the
+    // library and stream surfaces route to boot).
     return this.#url('/api/cover', { id: path })
   }
 
@@ -483,7 +581,9 @@ export class HttpBackend implements Backend {
     // session cookie automatically — so the subscription waits for login and
     // the token stays out of the URL entirely. If login fails there is
     // nothing to subscribe to (callers load the library first and will have
-    // already surfaced that failure).
+    // already surfaced that failure). A socket death re-probes auth: a dead
+    // credential routes to boot, a blip just re-handshakes (EventSource
+    // reconnects on its own).
     let source: EventSource | null = null
     let closed = false
     void this.startSession().then(
@@ -496,6 +596,9 @@ export class HttpBackend implements Backend {
           } catch {
             // A malformed push must never take the subscription down.
           }
+        }
+        source.onerror = () => {
+          this.probeAuthAfterFailure()
         }
       },
       () => undefined

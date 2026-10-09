@@ -135,7 +135,7 @@ The server binds all interfaces, so joining a private tailnet is enough for secu
 2. In Onda Settings, enable serving and pick the `https://100.x.x.x:…` address from the listed URLs (the tailnet one, not the home-LAN one).
 3. Pair with the QR code as above; the browser warns about the self-signed certificate once — compare its fingerprint to Settings, then trust it. The boot screen shows the expected fingerprint and stays locked until you confirm the match.
 
-Revoking a device in Settings logs that phone out immediately; rotating the access token logs out every phone; rotating the certificate only asks phones to confirm the new fingerprint once. Each listed address has its own QR / copy-link buttons so remote pairing uses the tailnet URL; hiding a QR, generating a new code, or closing Settings kills its pairing code immediately (quitting the app wipes all outstanding codes).
+Revoking a device in Settings logs that phone out immediately — including its open event streams; rotating the access token logs out every phone; rotating the certificate only asks phones to confirm the new fingerprint once (the boot link carries the expected fingerprint, and the phone refuses a changed server identity until re-paired knowingly). Each listed address has its own QR / copy-link buttons so remote pairing uses the tailnet URL; hiding a QR, generating a new code, or closing Settings kills its pairing code immediately (quitting the app wipes all outstanding codes). When the machine's addresses outgrow the certificate, Settings says so with a one-click server restart.
 
 ## Configuration and Persistence
 

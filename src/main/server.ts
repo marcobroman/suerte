@@ -7,7 +7,7 @@ import { isAbsolute, normalize, relative, resolve, sep } from 'node:path'
 import type { LibrarySummary, PublicLibrarySummary } from '@shared/ipc'
 import type { DeviceInfo, DeviceRecord, ServerSession, Track } from '@shared/types'
 import { extensionOf } from '@shared/audio-files'
-import { ALLOWED_COVER_MIME } from './library/covers'
+import { ALLOWED_COVER_MIME, MAX_COVER_BYTES } from './library/covers'
 
 export interface LibraryServerDeps {
   /** Read live so port changes apply without rebuilding the server. */
@@ -15,6 +15,8 @@ export interface LibraryServerDeps {
   getToken(): string | undefined
   /** TLS identity; null means plain HTTP (tests, or cert generation failed). */
   getTls(): { cert: string; key: string } | null
+  /** Explicit user opt-in to the plain-HTTP fallback; start() enforces it. */
+  getAllowInsecure(): boolean
   /** Sessions persisted in config, so phones stay logged in across restarts. */
   getSessions(): readonly ServerSession[]
   /** Called whenever a session is issued; the whole config is rewritten. */
@@ -127,11 +129,14 @@ export function selectServerTransport(
  * True when the requested path is a library root itself or lives under one.
  * relative() collapses `..` lexically, so anything escaping a root starts
  * with `..` (or resolves absolute on another drive) and is rejected.
+ * Case folds on Windows, where the filesystem itself is case-insensitive.
  */
 export function insideRoots(roots: readonly string[], candidate: string): boolean {
-  const normalized = normalize(candidate)
+  const fold = process.platform === 'win32'
+  const normalized = fold ? normalize(candidate).toLowerCase() : normalize(candidate)
   for (const root of roots) {
-    const rel = relative(root, normalized)
+    const base = fold ? normalize(root).toLowerCase() : root
+    const rel = relative(base, normalized)
     if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return true
   }
   return false
@@ -187,7 +192,9 @@ function handshakeAllowed(
   request: IncomingMessage,
   now: number = Date.now()
 ): { ok: true } | { ok: false; retryAfterSec: number } {
-  const ip = request.socket.remoteAddress ?? 'unknown'
+  // One bucket per peer: fold IPv6-mapped IPv4 (`::ffff:1.2.3.4`) onto the
+  // address it is, or one stack split-brains the limit.
+  const ip = bucketIp(request)
   if (seen.size > 1024) {
     for (const [key, entry] of seen) {
       if (now >= entry.resetAt) seen.delete(key)
@@ -211,6 +218,8 @@ const HEADERS_TIMEOUT_MS = 10_000
 const MAX_HEADER_COUNT = 100
 /** Live event subscribers; beyond this the server answers 503. */
 const MAX_EVENT_SUBSCRIBERS = 20
+/** Per-IP subscriber cap: one peer cannot hoard the global budget. */
+const MAX_EVENT_SUBSCRIBERS_PER_IP = 4
 /** SSE keepalive: NATs and proxies drop idle sockets the client cannot see. */
 const EVENT_HEARTBEAT_MS = 25_000
 
@@ -221,6 +230,12 @@ function json(response: ServerResponse, status: number, body: unknown): void {
     'content-length': Buffer.byteLength(payload)
   })
   response.end(payload)
+}
+
+/** Rate-limit (and subscriber) bucket key for a peer. Exported for tests. */
+export function bucketIp(request: Pick<IncomingMessage, 'socket'>): string {
+  const raw = request.socket.remoteAddress ?? 'unknown'
+  return raw.startsWith('::ffff:') ? raw.slice('::ffff:'.length) : raw
 }
 
 /** Login cookie name. HttpOnly so page JS can never steal it; SameSite=Strict
@@ -254,8 +269,15 @@ function readBody(request: IncomingMessage, limit: number): Promise<string | nul
     const finish = (body: string | null): void => {
       if (done) return
       done = true
+      clearTimeout(timer)
       resolve(body)
     }
+    // A dripped body must not idle forever: 10 seconds for 4 KB is generous
+    // to slow phones and fatal to slow-drip scripts.
+    const timer = setTimeout(() => {
+      request.destroy()
+      finish(null)
+    }, 10_000)
     request.on('data', (chunk: Buffer) => {
       size += chunk.length
       if (size > limit) {
@@ -273,7 +295,18 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
   let server: Server | HttpsServer | null = null
   let listening = false
   let boundPort = 0
-  const events = new Set<ServerResponse>()
+  /**
+   * Live event subscribers with the credential that opened them. Checked on
+   * every heartbeat and dropped proactively on revoke, so an expired or
+   * revoked phone stops receiving library pushes — revocation takes effect
+   * on open channels, not just new requests.
+   */
+  interface EventSubscriber {
+    response: ServerResponse
+    ip: string
+    auth: Exclude<AuthResult, null>
+  }
+  const events = new Set<EventSubscriber>()
   // Opaque id → real path, rebuilt only when the track list itself is replaced
   // (i.e. on rescan); lookups in between are map hits.
   let idCache: { tracks: readonly Track[]; byId: Map<string, string> } | null = null
@@ -350,6 +383,56 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
   // SSE keepalive timer; owned by start()/stop() like the socket itself.
   let heartbeat: NodeJS.Timeout | null = null
 
+  /** Live TLS identity for status surfaces; nulls when not serving HTTPS. */
+  function liveTlsStatus(): { secure: boolean; fingerprint: string | null; expiresAt: number | null } {
+    const tls = listening ? deps.getTls() : null
+    if (!tls) return { secure: false, fingerprint: null, expiresAt: null }
+    try {
+      const certificate = new X509Certificate(tls.cert)
+      const expiresAt = Date.parse(certificate.validTo)
+      return {
+        secure: true,
+        fingerprint: certificate.fingerprint256,
+        expiresAt: Number.isFinite(expiresAt) ? expiresAt : null
+      }
+    } catch {
+      return { secure: true, fingerprint: null, expiresAt: null }
+    }
+  }
+
+  /** Ends and forgets every subscriber matching a predicate (revocation). */
+  function dropSubscribers(predicate: (sub: EventSubscriber) => boolean): void {
+    for (const sub of [...events]) {
+      if (!predicate(sub)) continue
+      events.delete(sub)
+      try {
+        sub.response.end()
+      } catch {
+        // Already gone; the set removal is what matters.
+      }
+    }
+  }
+
+  /** True while the credential behind a subscription still authorizes. */
+  function subscriberAlive(sub: EventSubscriber, now: number = Date.now()): boolean {
+    if (sub.auth.kind === 'master') {
+      const token = deps.getToken()
+      return token !== undefined && secretsEqual(sub.auth.token, token)
+    }
+    if (sub.auth.kind === 'session') {
+      const session = sessions.get(sub.auth.id)
+      if (!session || !sessionAlive(session, now)) {
+        if (session) {
+          sessions.delete(sub.auth.id)
+          sessionsDirty = true
+        }
+        return false
+      }
+      return true
+    }
+    return takeLiveDevice(sub.auth.token, now) !== null
+  }
+
   /** Opaque device id for the settings UI: identifies for revoke, useless for login. */
   function deviceId(token: string): string {
     return createHash('sha256').update(token, 'utf8').digest('hex')
@@ -409,7 +492,11 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
   }
 
 /** Which credential authorized a request; null when none did. */
-type AuthResult = { kind: 'master' } | { kind: 'session'; id: string } | { kind: 'device'; token: string } | null
+type AuthResult =
+  | { kind: 'master'; token: string }
+  | { kind: 'session'; id: string }
+  | { kind: 'device'; token: string }
+  | null
 
 /**
  * Lifetimes: sessions die 30 days after issue no matter what, or after 7
@@ -479,7 +566,7 @@ function secretsEqual(a: string, b: string): boolean {
       }
       return null
     }
-    if (secretsEqual(presented, token)) return { kind: 'master' }
+    if (secretsEqual(presented, token)) return { kind: 'master', token: presented }
     // <audio> and <img> tags cannot set headers, so media URLs carry the
     // credential instead — a device token works there exactly like the master.
     const record = takeLiveDevice(presented, Date.now())
@@ -686,6 +773,10 @@ function secretsEqual(a: string, b: string): boolean {
       return
     }
     const bytes = Buffer.from(parsed[2], 'base64')
+    if (bytes.length > MAX_COVER_BYTES) {
+      json(response, 404, { error: 'no cover art' })
+      return
+    }
     response.writeHead(200, {
       'content-type': mime,
       'content-length': bytes.length,
@@ -757,6 +848,17 @@ function secretsEqual(a: string, b: string): boolean {
     response.setHeader('x-content-type-options', 'nosniff')
     response.setHeader('referrer-policy', 'no-referrer')
     response.setHeader('cross-origin-resource-policy', 'same-origin')
+    // Public identity: the fingerprint is trust-on-first-use material, not a
+    // secret (browsers display it), so phones can bind saved trust to it —
+    // no credential required, like the client shell below.
+    if (url.pathname === '/api/fingerprint') {
+      if (request.method !== 'GET') {
+        json(response, 405, { error: 'method not allowed' })
+        return
+      }
+      json(response, 200, { fingerprint: liveTlsStatus().fingerprint })
+      return
+    }
     // Logout revokes its own credential, so it authenticates inline here
     // rather than behind the GET-only gate below. A session dies with its
     // cookie, a device dies entirely; the master token has no per-login
@@ -785,7 +887,9 @@ function secretsEqual(a: string, b: string): boolean {
       }
       response.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
-        'set-cookie': `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0`
+        // Mirror the login cookie's flags exactly, or strict browsers keep
+        // the (revoked) Secure cookie this is meant to clear.
+        'set-cookie': `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${deps.getTls() ? '; Secure' : ''}`
       })
       response.end(JSON.stringify({ ok: true }))
       return
@@ -881,15 +985,32 @@ function secretsEqual(a: string, b: string): boolean {
         json(response, 503, { error: 'too many subscribers' })
         return
       }
+      const subscriberIp = bucketIp(request)
+      // Per-IP cap with oldest-first eviction: a reconnect storm from one
+      // peer (each EventSource retry opens a new socket while the old one
+      // lingers) must not deny live-updates to everyone else.
+      const sameIp = [...events].filter((sub) => sub.ip === subscriberIp)
+      if (sameIp.length >= MAX_EVENT_SUBSCRIBERS_PER_IP) {
+        const oldest = sameIp[0]
+        if (oldest) {
+          events.delete(oldest)
+          try {
+            oldest.response.end()
+          } catch {
+            // Already gone; the set removal is what matters.
+          }
+        }
+      }
       response.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-cache',
         connection: 'keep-alive'
       })
       response.flushHeaders()
-      events.add(response)
+      const subscriber: EventSubscriber = { response, ip: subscriberIp, auth }
+      events.add(subscriber)
       request.on('close', () => {
-        events.delete(response)
+        events.delete(subscriber)
       })
       return
     }
@@ -943,12 +1064,17 @@ function secretsEqual(a: string, b: string): boolean {
     },
 
     start(): Promise<string> {
-      const scheme = deps.getTls() ? 'https' : 'http'
+      const tls = deps.getTls()
+      const scheme = tls ? 'https' : 'http'
       if (server) return Promise.resolve(`${scheme}://localhost:${boundPort}`)
+      // Fail-closed is enforced here, not just in callers: without an
+      // identity the server only listens with explicit user opt-in.
+      if (selectServerTransport(tls, deps.getAllowInsecure()) === 'disabled') {
+        return Promise.reject(new Error('server has no certificate and insecure fallback is off'))
+      }
       return new Promise((resolve, reject) => {
         // HTTPS when a certificate is available (production), plain HTTP
         // otherwise (tests, or cert generation failed at enable time).
-        const tls = deps.getTls()
         const next = tls
           ? createHttpsServer({ cert: tls.cert, key: tls.key }, (request, response) => {
               void handle(request, response)
@@ -965,14 +1091,20 @@ function secretsEqual(a: string, b: string): boolean {
         next.headersTimeout = HEADERS_TIMEOUT_MS
         next.maxHeadersCount = MAX_HEADER_COUNT
         // SSE keepalive: NATs silently drop idle sockets the client cannot
-        // see. Dead peers surface on the next failed write and are pruned.
+        // see. Each tick also re-authenticates subscribers, so expiry and
+        // revoke take effect on open channels. Dead peers surface on the
+        // next failed write and are pruned.
         if (heartbeat) clearInterval(heartbeat)
         heartbeat = setInterval(() => {
-          for (const client of [...events]) {
+          for (const sub of [...events]) {
+            if (!subscriberAlive(sub)) {
+              dropSubscribers((dead) => dead === sub)
+              continue
+            }
             try {
-              client.write(': ping\n\n')
+              sub.response.write(': ping\n\n')
             } catch {
-              events.delete(client)
+              events.delete(sub)
             }
           }
         }, EVENT_HEARTBEAT_MS)
@@ -992,9 +1124,9 @@ function secretsEqual(a: string, b: string): boolean {
         clearInterval(heartbeat)
         heartbeat = null
       }
-      for (const client of events) {
+      for (const sub of events) {
         try {
-          client.end()
+          sub.response.end()
         } catch {
           // A dead subscriber must never block shutdown.
         }
@@ -1011,33 +1143,22 @@ function secretsEqual(a: string, b: string): boolean {
     pushLibraryChanged(): void {
       if (events.size === 0) return
       const payload = `data: ${JSON.stringify(publicSummary())}\n\n`
-      for (const client of [...events]) {
+      for (const sub of [...events]) {
         try {
-          client.write(payload)
+          sub.response.write(payload)
         } catch {
-          events.delete(client)
+          events.delete(sub)
         }
       }
     },
 
     tlsStatus(): { secure: boolean; fingerprint: string | null; expiresAt: number | null } {
-      const tls = listening ? deps.getTls() : null
-      if (!tls) return { secure: false, fingerprint: null, expiresAt: null }
-      try {
-        const certificate = new X509Certificate(tls.cert)
-        const expiresAt = Date.parse(certificate.validTo)
-        return {
-          secure: true,
-          fingerprint: certificate.fingerprint256,
-          expiresAt: Number.isFinite(expiresAt) ? expiresAt : null
-        }
-      } catch {
-        return { secure: true, fingerprint: null, expiresAt: null }
-      }
+      return liveTlsStatus()
     },
 
     async dropSessions(): Promise<void> {
       sessions.clear()
+      dropSubscribers((sub) => sub.auth.kind === 'session')
       await persistSessions()
     },
 
@@ -1067,6 +1188,7 @@ function secretsEqual(a: string, b: string): boolean {
       for (const [token] of devices) {
         if (deviceId(token) === id) {
           devices.delete(token)
+          dropSubscribers((sub) => sub.auth.kind === 'device' && sub.auth.token === token)
           await persistDevices()
           return true
         }
@@ -1081,6 +1203,7 @@ function secretsEqual(a: string, b: string): boolean {
     async dropDevices(): Promise<void> {
       devices.clear()
       pairings.clear()
+      dropSubscribers((sub) => sub.auth.kind === 'device')
       await persistDevices()
     }
   }

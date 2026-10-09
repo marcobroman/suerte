@@ -157,6 +157,12 @@ export interface ServerStatus {
   readonly fingerprint: string | null
   /** Cert expiry epoch ms, else null. */
   readonly certExpiresAt: number | null
+  /**
+   * True while the machine's addresses outgrew the certificate (new DHCP
+   * lease, Tailscale login): phones on the new address get name mismatch
+   * until serving restarts and the identity renews.
+   */
+  readonly certStale: boolean
   /** Paired phones/devices, for the desktop settings list. Always [] on phones. */
   readonly devices: readonly DeviceInfo[]
 }

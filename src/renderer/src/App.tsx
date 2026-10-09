@@ -32,7 +32,7 @@ import {
   type Selection
 } from './library/view'
 import type { PlaybackControls } from './usePlaybackEngine'
-import { phonePairUrl, describeServerUrl, LoggedOutError, type HttpBackend } from './http-backend'
+import { phonePairUrl, describeServerUrl, LoggedOutError, ServerIdentityChangedError, type HttpBackend } from './http-backend'
 import type { Backend } from './backend'
 import { ViewportDebug } from './ViewportDebug'
 
@@ -42,7 +42,7 @@ export interface AppProps {
   /** Phone client: desktop-only surfaces (folders, tagging, server admin) stay hidden. */
   readonly phone: boolean
   /** Phone only: the device was logged out (expiry/revoke) — return to boot. */
-  readonly onLoggedOut?: () => void
+  readonly onLoggedOut?: (notice: string) => void
 }
 
 export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
@@ -68,6 +68,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
     secure: false,
     fingerprint: null,
     certExpiresAt: null,
+    certStale: false,
     devices: []
   })
   const [serverToken, setServerToken] = useState<string | null>(null)
@@ -149,10 +150,11 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
         if (next.roots.length > 0 || next.trackCount > 0) setScanStatus('ready')
       })
       .catch((error: unknown) => {
-        // Logged out mid-life (expiry or desktop revoke): no retry makes
-        // sense here — hand back to the boot screen instead of an error.
-        if (error instanceof LoggedOutError) {
-          loggedOutRef.current?.()
+        // Logged out mid-life (expiry, desktop revoke) or facing a changed
+        // server identity: no retry makes sense here — hand back to the boot
+        // screen with the reason instead of an error.
+        if (error instanceof LoggedOutError || error instanceof ServerIdentityChangedError) {
+          loggedOutRef.current?.(error.message)
           return
         }
         setScanStatus(`error: ${String(error)}`)
@@ -307,22 +309,30 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
       .finally(() => setServerBusy(false))
   }, [backend, serverState.allowInsecure, refreshServerState])
 
-  const regenerateServerCert = useCallback(() => {    setServerBusy(true)
-    setQrDataUrl(null)
-    setQrCode(null)
-    setQrBase(null)
-    setQrExpiry(null)
-    void backend
-      .regenerateServerCert()
-      .then(
-        (settings) => {
-          refreshServerState(settings)
-          setServerMessage('New certificate — phones confirm the new fingerprint once.')
-        },
-        () => setServerMessage('Could not regenerate the certificate.')
-      )
-      .finally(() => setServerBusy(false))
-  }, [backend, refreshServerState])
+  /**
+   * The pairing code behind the displayed QR. A ref, not just state: jobs
+   * below serialize through a chain, and only the ref is current when a
+   * queued job finally runs — rapid clicks can no longer mint two codes.
+   */
+  const displayedCode = useRef<string | null>(null)
+  /** Serializes pairing jobs so burns always precede the mint they guard. */
+  const pairMutex = useRef<Promise<void>>(Promise.resolve())
+
+  const serializePairing = useCallback((job: () => Promise<void>): void => {
+    pairMutex.current = pairMutex.current.then(job, job)
+  }, [])
+
+  /** Burns one code, never throwing: the 10-minute expiry is the backstop. */
+  const burnCode = useCallback(
+    async (code: string): Promise<void> => {
+      try {
+        await backend.burnPairingCode(code)
+      } catch {
+        // Best effort, as above.
+      }
+    },
+    [backend]
+  )
 
   const clearQrDisplay = useCallback(() => {
     setQrDataUrl(null)
@@ -331,63 +341,138 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
     setQrExpiry(null)
   }, [])
 
-  /**
-   * Invalidates the currently displayed pairing code, if any. Fire-and-
-   * forget: a failed burn only leaves the 10-minute expiry as the backstop.
-   */
-  const burnDisplayedCode = useCallback(() => {
-    if (qrCode === null) return
-    void backend.burnPairingCode(qrCode).catch(() => undefined)
-  }, [backend, qrCode])
-
-  const hideQrCode = useCallback(() => {
-    burnDisplayedCode()
+  const restartServer = useCallback(() => {
+    setServerBusy(true)
+    setServerMessage('')
+    // Restarting keeps the in-memory pairing book, so burn the displayed
+    // code instead of orphaning it.
+    const shown = displayedCode.current
+    displayedCode.current = null
     clearQrDisplay()
-  }, [burnDisplayedCode, clearQrDisplay])
-
-  const showQrCode = useCallback(
-    async (base: string) => {
-      // The outgoing codes die first, so showing a QR never leaves two live
-      // codes for the same address (displayed or previously copied).
-      burnDisplayedCode()
-      const liveLink = linkCodes.current.get(base)
-      if (liveLink !== undefined) {
-        linkCodes.current.delete(base)
-        void backend.burnPairingCode(liveLink).catch(() => undefined)
-      }
-      setServerBusy(true)
+    serializePairing(async () => {
+      if (shown !== null) await burnCode(shown)
       try {
-        // Pairing entry, not API: the boot screen reads the single-use code
-        // from the fragment, which browsers never send to the server — and
-        // the master token never leaves this machine.
-        const pairing = await backend.getPairingCode()
-        if (!pairing) {
-          setServerMessage('Could not create a pairing code.')
-          clearQrDisplay()
-          return
+        const settings = await backend.restartServer()
+        refreshServerState(settings)
+        if (settings.server.url !== null) {
+          setServerMessage('Serving again — phones confirm the fingerprint if it changed.')
+        } else {
+          setServerMessage('Could not restart — the port may be taken.')
         }
-        setQrCode(pairing.code)
-        setQrBase(base)
-        setQrExpiry(pairing.expiresAt)
-        setQrDataUrl(
-          await QRCode.toDataURL(phonePairUrl(base, pairing.code, serverState.fingerprint), {
-            width: 200,
-            margin: 1
-          })
-        )
       } catch {
-        setServerMessage('Could not generate the QR code.')
-        clearQrDisplay()
+        setServerMessage('Could not restart the server.')
       } finally {
         setServerBusy(false)
       }
+    })
+  }, [backend, burnCode, clearQrDisplay, refreshServerState, serializePairing])
+
+  const regenerateServerCert = useCallback(() => {
+    setServerBusy(true)
+    // A new identity does not wipe pairing codes, so burn the displayed one
+    // instead of orphaning it.
+    const shown = displayedCode.current
+    displayedCode.current = null
+    clearQrDisplay()
+    serializePairing(async () => {
+      if (shown !== null) await burnCode(shown)
+      try {
+        const settings = await backend.regenerateServerCert()
+        refreshServerState(settings)
+        setServerMessage('New certificate — phones confirm the new fingerprint once.')
+      } catch {
+        setServerMessage('Could not regenerate the certificate.')
+      } finally {
+        setServerBusy(false)
+      }
+    })
+  }, [backend, burnCode, clearQrDisplay, refreshServerState, serializePairing])
+
+  const hideQrCode = useCallback((): void => {
+    const shown = displayedCode.current
+    displayedCode.current = null
+    clearQrDisplay()
+    if (shown !== null) serializePairing(() => burnCode(shown))
+  }, [burnCode, clearQrDisplay, serializePairing])
+
+  const showQrCode = useCallback(
+    (base: string): void => {
+      serializePairing(async () => {
+        // Earlier jobs finished (chain), so the ref is current: burn
+        // whatever is live for this address before minting.
+        const prior = displayedCode.current
+        if (prior !== null) {
+          displayedCode.current = null
+          await burnCode(prior)
+        }
+        const liveLink = linkCodes.current.get(base)
+        if (liveLink !== undefined) {
+          linkCodes.current.delete(base)
+          await burnCode(liveLink)
+        }
+        setServerBusy(true)
+        try {
+          // Pairing entry, not API: the boot screen reads the single-use code
+          // from the fragment, which browsers never send to the server — and
+          // the master token never leaves this machine.
+          const pairing = await backend.getPairingCode()
+          if (!pairing) {
+            setServerMessage('Could not create a pairing code.')
+            clearQrDisplay()
+            return
+          }
+          displayedCode.current = pairing.code
+          setQrCode(pairing.code)
+          setQrBase(base)
+          setQrExpiry(pairing.expiresAt)
+          setQrDataUrl(
+            await QRCode.toDataURL(phonePairUrl(base, pairing.code, serverState.fingerprint), {
+              width: 200,
+              margin: 1
+            })
+          )
+        } catch {
+          setServerMessage('Could not generate the QR code.')
+          clearQrDisplay()
+        } finally {
+          setServerBusy(false)
+        }
+      })
     },
-    [backend, burnDisplayedCode, clearQrDisplay, serverState.fingerprint]
+    [backend, burnCode, clearQrDisplay, serializePairing, serverState.fingerprint]
   )
 
   const renewQrCode = useCallback(() => {
-    if (qrBase !== null) void showQrCode(qrBase)
+    if (qrBase !== null) showQrCode(qrBase)
   }, [qrBase, showQrCode])
+
+  const copyPairLink = useCallback(
+    (base: string): void => {
+      serializePairing(async () => {
+        const previous = linkCodes.current.get(base)
+        if (previous !== undefined) {
+          linkCodes.current.delete(base)
+          await burnCode(previous)
+        }
+        setServerBusy(true)
+        try {
+          const pairing = await backend.getPairingCode()
+          if (!pairing) {
+            setServerMessage('Could not create a pairing code.')
+            return
+          }
+          linkCodes.current.set(base, pairing.code)
+          await navigator.clipboard.writeText(phonePairUrl(base, pairing.code, serverState.fingerprint))
+          setServerMessage('Copied — open it on the phone within 10 minutes.')
+        } catch {
+          setServerMessage('Copy failed — generate a QR code instead.')
+        } finally {
+          setServerBusy(false)
+        }
+      })
+    },
+    [backend, burnCode, serializePairing, serverState.fingerprint]
+  )
 
   const logoutPhone = useCallback(() => {
     if (!phone) return
@@ -398,34 +483,8 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
     void httpBackend
       .logout()
       .catch(() => undefined)
-      .then(() => loggedOutRef.current?.())
+      .then(() => loggedOutRef.current?.('Logged out on this phone.'))
   }, [backend, phone])
-
-  const copyPairLink = useCallback(
-    async (base: string) => {
-      setServerBusy(true)
-      try {
-        const previous = linkCodes.current.get(base)
-        if (previous !== undefined) {
-          linkCodes.current.delete(base)
-          void backend.burnPairingCode(previous).catch(() => undefined)
-        }
-        const pairing = await backend.getPairingCode()
-        if (!pairing) {
-          setServerMessage('Could not create a pairing code.')
-          return
-        }
-        linkCodes.current.set(base, pairing.code)
-        await navigator.clipboard.writeText(phonePairUrl(base, pairing.code, serverState.fingerprint))
-        setServerMessage('Copied — open it on the phone within 10 minutes.')
-      } catch {
-        setServerMessage('Copy failed — generate a QR code instead.')
-      } finally {
-        setServerBusy(false)
-      }
-    },
-    [backend, serverState.fingerprint]
-  )
 
   // Closing Settings with a QR on screen discards it like Hide does: the
   // displayed code is burned, so a photo of it stops working immediately.
@@ -1089,6 +1148,24 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
                             Certificate valid until{' '}
                             {new Date(serverState.certExpiresAt).toLocaleDateString()}
                           </p>
+                        )}
+                        {serverState.certStale && (
+                          <>
+                            <p className="settings-note">
+                              Network addresses changed — the certificate no longer names this
+                              machine. Restart serving to renew it (phones confirm the new
+                              fingerprint once).
+                            </p>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="settings-item"
+                              disabled={serverBusy}
+                              onClick={restartServer}
+                            >
+                              Restart server
+                            </button>
+                          </>
                         )}
                         <button
                           type="button"

@@ -34,6 +34,8 @@ const api: IpcApi = {
     ipcRenderer.invoke(IPC.setServerPort, port) as Promise<AppSettings>,
   setServerInsecure: (on: unknown) =>
     ipcRenderer.invoke(IPC.setServerInsecure, on) as Promise<AppSettings>,
+  restartServer: () =>
+    ipcRenderer.invoke(IPC.restartServer) as Promise<AppSettings>,
   regenerateServerToken: () =>
     ipcRenderer.invoke(IPC.regenerateServerToken) as Promise<AppSettings>,
   regenerateServerCert: () =>

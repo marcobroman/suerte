@@ -1,5 +1,6 @@
 import type { DiscogsCandidate, DiscogsRelease, DiscogsTrack } from '@shared/types'
 import type { DiscogsErrorKind } from '@shared/ipc'
+import { normalizeCoverMime } from './library/covers'
 
 export class DiscogsError extends Error {
   readonly kind: DiscogsErrorKind
@@ -208,8 +209,10 @@ export function createDiscogsClient(options: DiscogsClientOptions): DiscogsClien
       } catch {
         throw new DiscogsError('network', 'That cover URL is invalid.')
       }
-      const http = parsed.protocol === 'https:' || parsed.protocol === 'http:'
-      if (!http || !parsed.hostname.endsWith('.discogs.com')) {
+      // HTTPS-only on the Discogs CDN: no downgrade to sniffable HTTP, no
+      // off-CDN hosts. SVG is excluded by the MIME allowlist below — vector
+      // formats script, and cover art is always raster.
+      if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('.discogs.com')) {
         throw new DiscogsError('network', 'That cover URL is invalid.')
       }
       await pace(throttleMs)
@@ -223,8 +226,8 @@ export function createDiscogsClient(options: DiscogsClientOptions): DiscogsClien
         )
       }
       if (!response.ok) throw new DiscogsError('network', 'Cover download failed.')
-      const mime = (response.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
-      if (!mime.startsWith('image/')) throw new DiscogsError('network', 'That URL is not an image.')
+      const mime = normalizeCoverMime((response.headers.get('content-type') ?? '').split(';')[0] ?? '')
+      if (!mime) throw new DiscogsError('network', 'That URL is not a supported image.')
       return { mime, data: new Uint8Array(await response.arrayBuffer()) }
     }
   }

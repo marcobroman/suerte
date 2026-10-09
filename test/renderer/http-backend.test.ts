@@ -7,6 +7,7 @@ import {
   fingerprintFromHash,
   loadServerCredentials,
   LoggedOutError,
+  ServerIdentityChangedError,
   pairFromHash,
   phoneEntryUrl,
   phonePairUrl,
@@ -93,23 +94,73 @@ describe('HttpBackend', () => {
     const library = await backend.getLibrary()
 
     expect(library).toMatchObject({ trackCount: 3 })
-    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
     const sessionCall = fetchImpl.mock.calls[0]
-    const apiCall = fetchImpl.mock.calls[1]
+    const identityCall = fetchImpl.mock.calls[1]
+    const apiCall = fetchImpl.mock.calls[2]
     // The handshake carries the token in a header, never the URL.
     expect(sessionCall?.[0]).toBe('https://phone:4280/api/session')
     expect(sessionCall?.[1]).toMatchObject({
       method: 'POST',
       headers: { Authorization: 'Bearer tok' }
     })
+    // Trust binding rides the public fingerprint endpoint (no credential).
+    expect(identityCall?.[0]).toBe('https://phone:4280/api/fingerprint')
     // From then on the cookie authenticates: no token in the URL.
     expect(apiCall?.[0]).toBe('https://phone:4280/api/library')
     expect(apiCall?.[1]).toMatchObject({ headers: { Authorization: 'Bearer tok' } })
 
     // A second API call reuses the session — no new handshake.
     await backend.getLibrary()
-    expect(fetchImpl).toHaveBeenCalledTimes(3)
-    expect(fetchImpl.mock.calls[2]?.[0]).toBe('https://phone:4280/api/library')
+    expect(fetchImpl).toHaveBeenCalledTimes(4)
+    expect(fetchImpl.mock.calls[3]?.[0]).toBe('https://phone:4280/api/library')
+  })
+
+  it('adopts the server fingerprint on first sighting', async () => {
+    const { store, storage } = stubStorage()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/api/fingerprint')) return jsonResponse({ fingerprint: 'AA:BB' })
+        return jsonResponse({})
+      })
+    )
+    const backend = new HttpBackend('https://phone:4280/', 'tok', storage)
+
+    await backend.startSession()
+
+    expect(loadServerCredentials(storage)).toEqual({
+      baseUrl: 'https://phone:4280',
+      token: 'tok',
+      fingerprint: 'AA:BB'
+    })
+    expect(store.get('onda.phone.server')).toContain('AA:BB')
+  })
+
+  it('refuses a server whose fingerprint no longer matches', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/api/fingerprint')) return jsonResponse({ fingerprint: 'AA:BB' })
+        return jsonResponse({})
+      })
+    )
+    const backend = new HttpBackend('https://phone:4280/', 'tok', storage, 'XX:YY')
+
+    await expect(backend.startSession()).rejects.toBeInstanceOf(ServerIdentityChangedError)
+  })
+
+  it('treats a vanished certificate as an identity change', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/api/fingerprint')) return jsonResponse({ fingerprint: null })
+        return jsonResponse({})
+      })
+    )
+    const backend = new HttpBackend('https://phone:4280/', 'tok', storage, 'AA:BB')
+
+    await expect(backend.startSession()).rejects.toBeInstanceOf(ServerIdentityChangedError)
   })
 
   it('shares one session handshake across concurrent calls', async () => {
@@ -175,13 +226,12 @@ describe('HttpBackend', () => {
 
   it('reads file bytes for compatibility', async () => {
     const bytes = new Uint8Array([1, 2, 3])
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(bytes, { status: 200 }))
-    )
+    const fetchImpl = vi.fn(async (_url: string, _init?: { headers?: Record<string, string> }) => new Response(bytes, { status: 200 }))
+    vi.stubGlobal('fetch', fetchImpl)
     const backend = makeBackend()
 
     expect(new Uint8Array(await backend.readFile('a.mp3'))).toEqual(bytes)
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('https://phone:4280/api/stream?id=a.mp3&token=tok')
   })
 
   it('subscribes to library changes over SSE and unsubscribes', async () => {
@@ -225,6 +275,7 @@ describe('HttpBackend', () => {
       vi.fn(async (url: string) => {
         calls.push(url)
         if (url.endsWith('/api/session')) return jsonResponse({ ok: true })
+        if (url.endsWith('/api/fingerprint')) return jsonResponse({})
         if (calls.filter((call) => call.endsWith('/api/library')).length === 1) {
           return jsonResponse({ error: 'stale cookie' }, 401)
         }
@@ -241,11 +292,14 @@ describe('HttpBackend', () => {
     const library = await backend.getLibrary()
 
     expect(library).toMatchObject({ trackCount: 1 })
-    // Handshake, failed call, handshake again, replayed call.
+    // Handshake, identity check, failed call, handshake again, identity
+    // check, replayed call.
     expect(calls).toEqual([
       'https://phone:4280/api/session',
+      'https://phone:4280/api/fingerprint',
       'https://phone:4280/api/library',
       'https://phone:4280/api/session',
+      'https://phone:4280/api/fingerprint',
       'https://phone:4280/api/library'
     ])
   })
@@ -271,6 +325,7 @@ describe('HttpBackend', () => {
         sessions += 1
         return sessions === 1 ? jsonResponse({ ok: true }) : jsonResponse({ error: 'revoked' }, 401)
       }
+      if (typeof url === 'string' && url.endsWith('/api/fingerprint')) return jsonResponse({})
       return jsonResponse({ error: 'stale' }, 401)
     })
     const backend = makeBackend()
@@ -283,6 +338,7 @@ describe('HttpBackend', () => {
     let libraries = 0
     vi.stubGlobal('fetch', async (url: string) => {
       if (typeof url === 'string' && url.endsWith('/api/session')) return jsonResponse({ ok: true })
+      if (typeof url === 'string' && url.endsWith('/api/fingerprint')) return jsonResponse({})
       libraries += 1
       return jsonResponse({ error: 'gone' }, 401)
     })
@@ -296,7 +352,7 @@ describe('HttpBackend', () => {
     const fetchImpl = vi.fn(async (_url: string, _init?: { method?: string }) => jsonResponse({ ok: true }))
     vi.stubGlobal('fetch', fetchImpl)
     const { store, storage } = stubStorage()
-    saveServerCredentials(storage, { baseUrl: 'https://phone:4280', token: 'tok' })
+    saveServerCredentials(storage, { baseUrl: 'https://phone:4280', token: 'tok', fingerprint: null })
     const backend = new HttpBackend('https://phone:4280/', 'tok', storage)
 
     await backend.logout()
@@ -480,8 +536,23 @@ describe('server credentials', () => {
     const { storage } = stubStorage()
 
     expect(loadServerCredentials(storage)).toBeNull()
-    saveServerCredentials(storage, { baseUrl: 'https://phone:4280', token: 'tok' })
-    expect(loadServerCredentials(storage)).toEqual({ baseUrl: 'https://phone:4280', token: 'tok' })
+    saveServerCredentials(storage, { baseUrl: 'https://phone:4280', token: 'tok', fingerprint: 'AA:BB' })
+    expect(loadServerCredentials(storage)).toEqual({
+      baseUrl: 'https://phone:4280',
+      token: 'tok',
+      fingerprint: 'AA:BB'
+    })
+  })
+
+  it('backfills a missing fingerprint for legacy entries', () => {
+    const { store, storage } = stubStorage()
+    store.set('onda.phone.server', JSON.stringify({ baseUrl: 'https://phone:4280', token: 'tok' }))
+
+    expect(loadServerCredentials(storage)).toEqual({
+      baseUrl: 'https://phone:4280',
+      token: 'tok',
+      fingerprint: null
+    })
   })
 
   it('drops blanks and malformed entries', () => {

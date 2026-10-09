@@ -1,6 +1,22 @@
 import { useState } from 'react'
 import { HttpBackend, exchangePairingCode } from '../http-backend'
 
+/**
+ * Whether the entered address is plain HTTP (no certificate exists to
+ * verify) or HTTPS without a pinned fingerprint (an old or hand-typed link).
+ */
+function unverifiedWarning(baseUrl: string): string {
+  let secure = false
+  try {
+    secure = new URL(baseUrl.trim()).protocol === 'https:'
+  } catch {
+    // Unparseable stays on the alarming side: treat as unencrypted.
+  }
+  return secure
+    ? 'This link carries no certificate fingerprint — open desktop Settings and compare it manually before continuing.'
+    : 'This connection is unencrypted (no certificate) — anyone on this network could read it. Continue only on a network you trust.'
+}
+
 export interface PhoneBootProps {
   readonly initialBaseUrl: string
   readonly initialToken: string | null
@@ -61,6 +77,9 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
   const [pairingCode] = useState(initialPairingCode ?? '')
   const [fingerprint] = useState(initialFingerprint)
   const [acknowledged, setAcknowledged] = useState(false)
+  // Separate gate for fingerprint-less links: acknowledging an unverified
+  // connection is a different decision than confirming a match.
+  const [unverifiedAck, setUnverifiedAck] = useState(false)
   const [deviceName, setDeviceName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -128,10 +147,17 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
               onAcknowledge={setAcknowledged}
             />
           ) : (
-            <p className="content-sub">
-              This link predates certificate fingerprints — compare the
-              fingerprint in desktop Settings manually before pairing.
-            </p>
+            <>
+              <p className="content-sub">{unverifiedWarning(baseUrl)}</p>
+              <label className="boot-label">
+                <input
+                  type="checkbox"
+                  checked={unverifiedAck}
+                  onChange={(event) => setUnverifiedAck(event.target.checked)}
+                />{' '}
+                I understand this connection is unverified
+              </label>
+            </>
           )}
           {error !== null && (
             <p className="modal-error" role="alert">
@@ -141,7 +167,11 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
           <button
             type="button"
             className="primary-button boot-connect"
-            disabled={busy || deviceName.trim() === '' || (fingerprint !== null && !acknowledged)}
+            disabled={
+              busy ||
+              deviceName.trim() === '' ||
+              (fingerprint !== null ? !acknowledged : !unverifiedAck)
+            }
             onClick={() => void pair()}
           >
             {busy ? 'Pairing…' : 'Pair this device'}
@@ -186,12 +216,24 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
           placeholder="From Settings on the desktop app"
           autoComplete="off"
         />
-        {fingerprint !== null && (
+        {fingerprint !== null ? (
           <FingerprintCheck
             fingerprint={fingerprint}
             acknowledged={acknowledged}
             onAcknowledge={setAcknowledged}
           />
+        ) : (
+          <>
+            <p className="content-sub">{unverifiedWarning(baseUrl)}</p>
+            <label className="boot-label">
+              <input
+                type="checkbox"
+                checked={unverifiedAck}
+                onChange={(event) => setUnverifiedAck(event.target.checked)}
+              />{' '}
+              I understand this connection is unverified
+            </label>
+          </>
         )}
         {error !== null && (
           <p className="modal-error" role="alert">
@@ -202,7 +244,10 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
           type="button"
           className="primary-button boot-connect"
           disabled={
-            busy || baseUrl.trim() === '' || token.trim() === '' || (fingerprint !== null && !acknowledged)
+            busy ||
+            baseUrl.trim() === '' ||
+            token.trim() === '' ||
+            (fingerprint !== null ? !acknowledged : !unverifiedAck)
           }
           onClick={() => void connect()}
         >

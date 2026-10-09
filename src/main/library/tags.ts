@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { copyFile, open, rm, stat } from 'node:fs/promises'
+import { chmod, copyFile, lstat, open, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import NodeID3 from 'node-id3'
@@ -101,6 +101,12 @@ export async function writeTrackTags(path: string, edits: TagEdits): Promise<Tag
   }
 
   try {
+    // A symlink here would write through to a file outside the library, so
+    // it fails the same way a missing file does (the IPC gate already
+    // resolved the real path; this closes the swap-between-check-and-write).
+    if ((await lstat(path)).isSymbolicLink()) {
+      return { path, ok: false, error: { kind: 'unreadable', message: 'not a regular file' } }
+    }
     await stat(path)
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
@@ -118,6 +124,13 @@ export async function writeTrackTags(path: string, edits: TagEdits): Promise<Tag
   const backup = join(tmpdir(), `equalizer-tagbak-${randomUUID()}`)
   try {
     await copyFile(path, backup)
+    // A crash between backup and cleanup leaves a complete audio file
+    // behind; owner-only permissions keep it out of other users' reach.
+    try {
+      await chmod(backup, 0o600)
+    } catch {
+      // Windows has no POSIX modes; best effort, as elsewhere.
+    }
   } catch (error: unknown) {
     return { path, ok: false, error: { kind: 'write-failed', message: `backup: ${messageOf(error)}` } }
   }

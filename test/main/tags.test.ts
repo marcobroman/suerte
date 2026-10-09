@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -117,6 +117,22 @@ describe('writeTrackTags', () => {
     expect(common.title).toBe('Only Title')
     expect(common.artist).toBe('Seed Artist')
     expect(common.track.no).toBe(2)
+  })
+
+  it('refuses to write through symlinks', async () => {
+    const path = await seed('real.mp3')
+    const link = join(dir, 'link.mp3')
+    try {
+      await symlink(path, link)
+    } catch {
+      // No link privilege on this machine; the IPC gate plus serve-time
+      // canonical check still cover escapes where links can be planted.
+      return
+    }
+
+    const result = await writeTrackTags(link, { title: 'Evil' })
+
+    expect(result.ok).toBe(false)
   })
 
   it('embeds cover art verifiable by re-parse', async () => {

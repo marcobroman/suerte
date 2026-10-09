@@ -1,4 +1,4 @@
-import { StrictMode, useCallback, useMemo, useState } from 'react'
+import { StrictMode, useCallback, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import type { Backend } from './backend'
@@ -20,9 +20,17 @@ function DesktopRoot({ backend }: { backend: Backend }) {
   )
 }
 
-function PhoneRoot({ backend, onLoggedOut }: { backend: HttpBackend; onLoggedOut: () => void }) {
+function PhoneRoot({ backend, onLoggedOut }: { backend: HttpBackend; onLoggedOut: (notice: string) => void }) {
   const playback = useStreamEngine(backend)
   const covers = useMemo(() => new CoverStore((path) => backend.readCover(path)), [backend])
+  // Media/stream/SSE surfaces cannot route to boot alone: they report login
+  // death here, and App's library load reports it too (idempotent).
+  useEffect(() => {
+    backend.onLoggedOut = () => onLoggedOut('This phone was logged out — pair it again to continue.')
+    return () => {
+      backend.onLoggedOut = null
+    }
+  }, [backend, onLoggedOut])
   return (
     <CoverStoreContext.Provider value={covers}>
       <App backend={backend} playback={playback} phone onLoggedOut={onLoggedOut} />
@@ -39,7 +47,9 @@ function Root() {
   const [phoneBackend, setPhoneBackend] = useState<HttpBackend | null>(() => {
     if (typeof window !== 'undefined' && window.equalizer) return null
     const saved = loadServerCredentials(window.localStorage)
-    return saved ? new HttpBackend(saved.baseUrl, saved.token, window.localStorage) : null
+    return saved
+      ? new HttpBackend(saved.baseUrl, saved.token, window.localStorage, saved.fingerprint)
+      : null
   })
   // Shown on the boot screen after an expiry/revoke logout or a manual one.
   const [logoutNotice, setLogoutNotice] = useState<string | null>(null)
@@ -49,10 +59,13 @@ function Root() {
     setPhoneBackend(null)
   }, [])
 
-  const handleLoggedOut = useCallback(() => {
-    forgetPhone()
-    setLogoutNotice('This phone was logged out — pair it again to continue.')
-  }, [forgetPhone])
+  const handleLoggedOut = useCallback(
+    (notice: string) => {
+      forgetPhone()
+      setLogoutNotice(notice)
+    },
+    [forgetPhone]
+  )
 
   if (typeof window !== 'undefined' && window.equalizer) {
     return <DesktopRoot backend={window.equalizer} />
@@ -66,9 +79,10 @@ function Root() {
         initialFingerprint={fingerprintFromHash(window.location.hash)}
         notice={logoutNotice}
         onConnect={(baseUrl, token) => {
-          saveServerCredentials(window.localStorage, { baseUrl, token })
+          const fingerprint = fingerprintFromHash(window.location.hash)
+          saveServerCredentials(window.localStorage, { baseUrl, token, fingerprint })
           setLogoutNotice(null)
-          setPhoneBackend(new HttpBackend(baseUrl, token, window.localStorage))
+          setPhoneBackend(new HttpBackend(baseUrl, token, window.localStorage, fingerprint))
         }}
       />
     )

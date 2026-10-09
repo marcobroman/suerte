@@ -23,7 +23,10 @@ export function useStreamEngine(backend: HttpBackend): PlaybackControls {
     const engine = new StreamEngine({
       createGraph: createWebAudioGraph,
       createAudio: () => new Audio(),
-      streamUrl: (path) => backendRef.current.streamUrl(path)
+      streamUrl: (path) => backendRef.current.streamUrl(path),
+      // The element reports no status: a 401 looks like any other failure,
+      // so re-probe auth and let a dead credential route to boot.
+      onMediaError: () => backendRef.current.probeAuthAfterFailure()
     })
     engineRef.current = engine
     const unsubscribe = engine.subscribe(setStatus)

@@ -182,4 +182,24 @@ describe('createDiscogsClient', () => {
       kind: 'network'
     })
   })
+
+  it('requires https and raster images for art', async () => {
+    const bytes = new Response('fake-bytes', { headers: { 'content-type': 'image/jpeg' } })
+    const fetchImpl = stubFetch(() => bytes)
+    const client = createDiscogsClient({ token: 't', throttleMs: 0, fetchImpl: fetchImpl as unknown as typeof fetch })
+
+    await expect(client.fetchArt('http://i.discogs.com/primary.jpg')).rejects.toMatchObject({
+      kind: 'network'
+    })
+    const svg = createDiscogsClient({
+      token: 't',
+      throttleMs: 0,
+      fetchImpl: stubFetch(
+        () => new Response('<svg>', { headers: { 'content-type': 'image/svg+xml' } })
+      ) as unknown as typeof fetch
+    })
+    await expect(svg.fetchArt('https://i.discogs.com/x.svg')).rejects.toMatchObject({
+      kind: 'network'
+    })
+  })
 })

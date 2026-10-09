@@ -9,6 +9,12 @@ export interface StreamEngineOptions {
   createAudio(): MediaElementLike
   /** Maps a library path to a playable stream URL. Wired by the HTTP backend. */
   streamUrl(path: string): string
+  /**
+   * Fired when the element errors (no HTTP status available from tags): the
+   * phone wiring re-probes auth here so a dead credential routes to boot
+   * instead of leaving "Playback failed." on screen.
+   */
+  onMediaError?(): void
   onChange?(status: EngineStatus): void
   /** Fired when the final track reaches its end, for UI affordances. */
   onQueueEnd?(): void
@@ -502,6 +508,7 @@ export class StreamEngine {
 
   #onError = (): void => {
     if (this.#state !== 'playing' && this.#state !== 'loading') return
+    this.#options.onMediaError?.()
     this.#fail(new Error('Playback failed.'))
   }
 

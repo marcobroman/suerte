@@ -208,6 +208,9 @@ export function AutoTagDialog({ files, skipped, initialQuery, onClose }: AutoTag
                             src={candidate.thumbUrl}
                             alt=""
                             loading="lazy"
+                            // Remote Discogs art: no referrer leaks the page
+                            // URL, and scripts never run from <img>.
+                            referrerPolicy="no-referrer"
                           />
                         ) : (
                           <span className="candidate-thumb empty-thumb" aria-hidden="true" />
@@ -235,7 +238,12 @@ export function AutoTagDialog({ files, skipped, initialQuery, onClose }: AutoTag
                   <>
                     <div className="release-head">
                       {release.coverUrl ? (
-                        <img className="release-cover" src={release.coverUrl} alt="" />
+                        <img
+                          className="release-cover"
+                          src={release.coverUrl}
+                          alt=""
+                          referrerPolicy="no-referrer"
+                        />
                       ) : (
                         <span className="release-cover empty-thumb" aria-hidden="true" />
                       )}
