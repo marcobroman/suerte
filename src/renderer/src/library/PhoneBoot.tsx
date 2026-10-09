@@ -105,7 +105,7 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
     setError(null)
     try {
       const trimmedBase = baseUrl.trim()
-      const deviceToken = await exchangePairingCode(trimmedBase, pairingCode, deviceName)
+      const deviceToken = await exchangePairingCode(trimmedBase, pairingCode, deviceName, fingerprint)
       const probe = new HttpBackend(trimmedBase, deviceToken, window.localStorage)
       await probe.getLibrary()
       onConnect(trimmedBase, deviceToken)

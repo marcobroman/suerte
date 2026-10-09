@@ -50,6 +50,9 @@ export function sanitizeTagEdits(value: unknown): TagEdits {
 
 const SUPPORTED_ART_MIMES = new Set(['image/jpeg', 'image/png'])
 
+/** Largest embedded picture accepted for a tag write (matches cover serving). */
+const MAX_TAG_ART_BYTES = 12 * 1024 * 1024
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -96,7 +99,10 @@ export async function writeTrackTags(path: string, edits: TagEdits): Promise<Tag
   if (edits.discNo !== undefined) {
     return { path, ok: false, error: { kind: 'unsupported-field', field: 'discNo' } }
   }
-  if (edits.art !== undefined && !SUPPORTED_ART_MIMES.has(edits.art.mime.toLowerCase())) {
+  if (
+    edits.art !== undefined &&
+    (!SUPPORTED_ART_MIMES.has(edits.art.mime.toLowerCase()) || edits.art.data.length > MAX_TAG_ART_BYTES)
+  ) {
     return { path, ok: false, error: { kind: 'unsupported-field', field: 'art' } }
   }
 

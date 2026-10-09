@@ -95,17 +95,17 @@ describe('HttpBackend', () => {
 
     expect(library).toMatchObject({ trackCount: 3 })
     expect(fetchImpl).toHaveBeenCalledTimes(3)
-    const sessionCall = fetchImpl.mock.calls[0]
-    const identityCall = fetchImpl.mock.calls[1]
+    const identityCall = fetchImpl.mock.calls[0]
+    const sessionCall = fetchImpl.mock.calls[1]
     const apiCall = fetchImpl.mock.calls[2]
+    // Trust is bound before anything secret crosses.
+    expect(identityCall?.[0]).toBe('https://phone:4280/api/fingerprint')
     // The handshake carries the token in a header, never the URL.
     expect(sessionCall?.[0]).toBe('https://phone:4280/api/session')
     expect(sessionCall?.[1]).toMatchObject({
       method: 'POST',
       headers: { Authorization: 'Bearer tok' }
     })
-    // Trust binding rides the public fingerprint endpoint (no credential).
-    expect(identityCall?.[0]).toBe('https://phone:4280/api/fingerprint')
     // From then on the cookie authenticates: no token in the URL.
     expect(apiCall?.[0]).toBe('https://phone:4280/api/library')
     expect(apiCall?.[1]).toMatchObject({ headers: { Authorization: 'Bearer tok' } })
@@ -138,29 +138,28 @@ describe('HttpBackend', () => {
   })
 
   it('refuses a server whose fingerprint no longer matches', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string) => {
-        if (url.endsWith('/api/fingerprint')) return jsonResponse({ fingerprint: 'AA:BB' })
-        return jsonResponse({})
-      })
-    )
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/fingerprint')) return jsonResponse({ fingerprint: 'AA:BB' })
+      return jsonResponse({})
+    })
+    vi.stubGlobal('fetch', fetchImpl)
     const backend = new HttpBackend('https://phone:4280/', 'tok', storage, 'XX:YY')
 
     await expect(backend.startSession()).rejects.toBeInstanceOf(ServerIdentityChangedError)
+    // The token never crossed: only the public identity read went out.
+    expect(fetchImpl).toHaveBeenCalledOnce()
   })
 
   it('treats a vanished certificate as an identity change', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string) => {
-        if (url.endsWith('/api/fingerprint')) return jsonResponse({ fingerprint: null })
-        return jsonResponse({})
-      })
-    )
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/fingerprint')) return jsonResponse({ fingerprint: null })
+      return jsonResponse({})
+    })
+    vi.stubGlobal('fetch', fetchImpl)
     const backend = new HttpBackend('https://phone:4280/', 'tok', storage, 'AA:BB')
 
     await expect(backend.startSession()).rejects.toBeInstanceOf(ServerIdentityChangedError)
+    expect(fetchImpl).toHaveBeenCalledOnce()
   })
 
   it('shares one session handshake across concurrent calls', async () => {
@@ -292,14 +291,14 @@ describe('HttpBackend', () => {
     const library = await backend.getLibrary()
 
     expect(library).toMatchObject({ trackCount: 1 })
-    // Handshake, identity check, failed call, handshake again, identity
-    // check, replayed call.
+    // Identity check, handshake, failed call, identity check, handshake
+    // again, replayed call.
     expect(calls).toEqual([
-      'https://phone:4280/api/session',
       'https://phone:4280/api/fingerprint',
+      'https://phone:4280/api/session',
       'https://phone:4280/api/library',
-      'https://phone:4280/api/session',
       'https://phone:4280/api/fingerprint',
+      'https://phone:4280/api/session',
       'https://phone:4280/api/library'
     ])
   })
@@ -497,8 +496,9 @@ describe('describeServerUrl', () => {
 })
 
 describe('exchangePairingCode', () => {
-  it('posts the code and name, returning the device token', async () => {
+  it('checks identity before posting the code, returning the device token', async () => {
     const fetchImpl = vi.fn(async (url: string, init?: { body?: string }) => {
+      if (url.endsWith('/api/fingerprint')) return jsonResponse({})
       expect(url).toBe('https://phone:4280/api/pair')
       expect(JSON.parse(String(init?.body))).toEqual({ code: 'AB3DF9K2Q', name: 'Phone' })
       return jsonResponse({ token: 'device-token' })
@@ -508,11 +508,31 @@ describe('exchangePairingCode', () => {
     const token = await exchangePairingCode('https://phone:4280/', 'AB3DF9K2Q', '  Phone  ')
 
     expect(token).toBe('device-token')
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('https://phone:4280/api/fingerprint')
+  })
+
+  it('transmits nothing when the identity mismatches', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/fingerprint')) return jsonResponse({ fingerprint: 'AA:BB' })
+      return jsonResponse({ token: 'device-token' })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+
+    await expect(
+      exchangePairingCode('https://phone:4280', 'CODE', 'Phone', 'XX:YY')
+    ).rejects.toBeInstanceOf(ServerIdentityChangedError)
     expect(fetchImpl).toHaveBeenCalledOnce()
   })
 
   it('explains expired codes and rejects blank names locally', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'unauthorized' }, 401)))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/api/fingerprint')) return jsonResponse({})
+        return jsonResponse({ error: 'unauthorized' }, 401)
+      })
+    )
 
     await expect(exchangePairingCode('https://phone:4280', 'USED', 'Phone')).rejects.toThrow(
       /fresh one/
@@ -523,7 +543,13 @@ describe('exchangePairingCode', () => {
   })
 
   it('rejects malformed server answers', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: true })))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/api/fingerprint')) return jsonResponse({})
+        return jsonResponse({ ok: true })
+      })
+    )
 
     await expect(exchangePairingCode('https://phone:4280', 'CODE', 'Phone')).rejects.toThrow(
       /without a token/

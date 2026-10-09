@@ -148,6 +148,16 @@ describe('writeTrackTags', () => {
     expect(common.picture?.[0]?.format).toBe('image/png')
   })
 
+  it('rejects oversized cover art instead of embedding it', async () => {
+    const path = await seed()
+
+    const result = await writeTrackTags(path, {
+      art: { mime: 'image/png', data: Buffer.alloc(12 * 1024 * 1024 + 1) }
+    })
+
+    expect(result).toEqual({ path, ok: false, error: { kind: 'unsupported-field', field: 'art' } })
+  })
+
   it('rejects unsupported formats without touching the file', async () => {
     const path = join(dir, 'song.flac')
     await writeFile(path, mp3Bytes(SEED))

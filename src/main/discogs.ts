@@ -32,6 +32,8 @@ export interface DiscogsClient {
 const API_ROOT = 'https://api.discogs.com'
 const USER_AGENT = 'Equalizer/0.1.0 (desktop music player)'
 const DEFAULT_THROTTLE_MS = 1100
+/** Largest cover download accepted into memory (8 MB). */
+const MAX_DISCOGS_ART_BYTES = 8 * 1024 * 1024
 
 /** Shared across instances so rapid successive dialogs stay under the limit. */
 let lastCallAt = 0
@@ -216,19 +218,51 @@ export function createDiscogsClient(options: DiscogsClientOptions): DiscogsClien
         throw new DiscogsError('network', 'That cover URL is invalid.')
       }
       await pace(throttleMs)
-      let response: Response
-      try {
-        response = await fetchImpl(url, { headers: { 'User-Agent': USER_AGENT } })
-      } catch (error: unknown) {
-        throw new DiscogsError(
-          'network',
-          error instanceof Error ? error.message : 'Cover download failed.'
-        )
+      // Redirects are followed by hand (at most two hops), and every hop is
+      // re-validated: the stock follow-redirects behavior would let a
+      // compromised CDN record bounce the download to an arbitrary host.
+      let current = url
+      for (let hop = 0; hop < 3; hop++) {
+        let response: Response
+        try {
+          response = await fetchImpl(current, {
+            headers: { 'User-Agent': USER_AGENT },
+            redirect: 'manual'
+          })
+        } catch (error: unknown) {
+          throw new DiscogsError(
+            'network',
+            error instanceof Error ? error.message : 'Cover download failed.'
+          )
+        }
+        if (response.status >= 300 && response.status < 400) {
+          const location = response.headers.get('location')
+          let next: URL | null = null
+          try {
+            if (location) next = new URL(location, current)
+          } catch {
+            next = null
+          }
+          if (!next || next.protocol !== 'https:' || !next.hostname.endsWith('.discogs.com')) {
+            throw new DiscogsError('network', 'That cover URL is invalid.')
+          }
+          current = next.toString()
+          continue
+        }
+        if (!response.ok) throw new DiscogsError('network', 'Cover download failed.')
+        const announced = Number(response.headers.get('content-length') ?? '0')
+        if (Number.isFinite(announced) && announced > MAX_DISCOGS_ART_BYTES) {
+          throw new DiscogsError('network', 'That cover art is too large.')
+        }
+        const data = new Uint8Array(await response.arrayBuffer())
+        if (data.length > MAX_DISCOGS_ART_BYTES) {
+          throw new DiscogsError('network', 'That cover art is too large.')
+        }
+        const mime = normalizeCoverMime((response.headers.get('content-type') ?? '').split(';')[0] ?? '')
+        if (!mime) throw new DiscogsError('network', 'That URL is not a supported image.')
+        return { mime, data }
       }
-      if (!response.ok) throw new DiscogsError('network', 'Cover download failed.')
-      const mime = normalizeCoverMime((response.headers.get('content-type') ?? '').split(';')[0] ?? '')
-      if (!mime) throw new DiscogsError('network', 'That URL is not a supported image.')
-      return { mime, data: new Uint8Array(await response.arrayBuffer()) }
+      throw new DiscogsError('network', 'That cover URL redirects too much.')
     }
   }
 }

@@ -384,6 +384,7 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
       // persistConfig below rewrites the same emptied state regardless.
     }
     await context.server?.dropDevices()
+    context.server?.dropMasterSubscribers()
     await persistConfig()
     return settingsOf(context)
   })

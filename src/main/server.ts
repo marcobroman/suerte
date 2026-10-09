@@ -59,6 +59,12 @@ export interface LibraryServer {
   /** Revokes one device by its id; unknown ids report false. */
   revokeDevice(id: string): Promise<boolean>
   /**
+   * Ends every subscription authed by the master secret. Token rotation
+   * changes the secret that device/session drops do not cover, so rotation
+   * calls this to leave no open channel behind.
+   */
+  dropMasterSubscribers(): void
+  /**
    * Invalidates one outstanding pairing code (desktop hid its QR). Unknown
    * or already-consumed codes report false; both are safe no-ops.
    */
@@ -1205,6 +1211,10 @@ function secretsEqual(a: string, b: string): boolean {
       pairings.clear()
       dropSubscribers((sub) => sub.auth.kind === 'device')
       await persistDevices()
+    },
+
+    dropMasterSubscribers(): void {
+      dropSubscribers((sub) => sub.auth.kind === 'master')
     }
   }
 }

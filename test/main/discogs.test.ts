@@ -202,4 +202,40 @@ describe('createDiscogsClient', () => {
       kind: 'network'
     })
   })
+
+  it('validates every redirect hop and caps download size', async () => {
+    const hopping = createDiscogsClient({
+      token: 't',
+      throttleMs: 0,
+      fetchImpl: stubFetch((url: string) => {
+        if (url === 'https://i.discogs.com/hop.jpg') {
+          return Response.redirect('https://evil.example/x.jpg', 302)
+        }
+        if (url === 'https://i.discogs.com/ok-hop.jpg') {
+          return Response.redirect('https://i.discogs.com/final.jpg', 302)
+        }
+        if (url === 'https://i.discogs.com/final.jpg') {
+          return new Response('fake-bytes', { headers: { 'content-type': 'image/jpeg' } })
+        }
+        if (url === 'https://i.discogs.com/huge.jpg') {
+          return new Response('x', {
+            headers: { 'content-type': 'image/jpeg', 'content-length': String(9 * 1024 * 1024) }
+          })
+        }
+        throw new Error(`unexpected fetch ${url}`)
+      }) as unknown as typeof fetch
+    })
+
+    // Off-CDN redirect target: rejected before following.
+    await expect(hopping.fetchArt('https://i.discogs.com/hop.jpg')).rejects.toMatchObject({
+      kind: 'network'
+    })
+    // On-CDN redirect: followed once, art accepted.
+    const art = await hopping.fetchArt('https://i.discogs.com/ok-hop.jpg')
+    expect(art.mime).toBe('image/jpeg')
+    // Announced bulk rejected without downloading.
+    await expect(hopping.fetchArt('https://i.discogs.com/huge.jpg')).rejects.toMatchObject({
+      kind: 'network'
+    })
+  })
 })

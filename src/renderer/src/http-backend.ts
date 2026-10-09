@@ -170,14 +170,41 @@ export function fingerprintFromHash(hash: string): string | null {
 }
 
 /**
+ * Reads the server's public identity without sending any credential, and
+ * throws when it does not match pinned trust. Called BEFORE transmitting
+ * anything secret: under an active impersonator the mismatch aborts first
+ * contact, so pairing codes and tokens never cross to the wrong server.
+ * Returns the observed fingerprint (null over plain HTTP) for adoption.
+ */
+export async function assertServerIdentity(
+  baseUrl: string,
+  expectedFingerprint: string | null
+): Promise<string | null> {
+  const identity = await readJson<{ fingerprint?: unknown }>(
+    await fetch(`${baseUrl.replace(/\/+$/, '')}/api/fingerprint`)
+  )
+  const actual = typeof identity.fingerprint === 'string' ? identity.fingerprint : null
+  if (expectedFingerprint !== null && actual !== expectedFingerprint) {
+    throw new ServerIdentityChangedError()
+  }
+  return actual
+}
+
+/**
  * Redeems a pairing code for this device's own token. Called before any
  * HttpBackend exists (the token is the credential it is built with), so it
  * is a module function taking an explicit base URL. Throws on expired,
  * consumed, or wrong codes — the message names the likely cause.
  */
-export async function exchangePairingCode(baseUrl: string, code: string, name: string): Promise<string> {
+export async function exchangePairingCode(
+  baseUrl: string,
+  code: string,
+  name: string,
+  expectedFingerprint: string | null = null
+): Promise<string> {
   const trimmedName = name.trim()
   if (trimmedName === '') throw new Error('Name your device first.')
+  await assertServerIdentity(baseUrl, expectedFingerprint)
   const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/pair`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -278,28 +305,23 @@ export class HttpBackend implements Backend {
    * is unreachable — callers fail loudly rather than silently falling back
    * to tokens in URLs.
    *
-   * After the handshake the public fingerprint endpoint binds saved trust:
-   * a mismatch with the pinned fingerprint throws ServerIdentityChangedError
-   * (possible impostor — never retry silently), while a first sighting
-   * adopts the fingerprint into stored credentials.
+   * Identity is verified before anything secret crosses: the public
+   * fingerprint endpoint is read first, and a mismatch aborts without
+   * transmitting the token. A first sighting adopts the fingerprint into
+   * stored credentials (after the successful handshake, so a wrong token
+   * never persists trust).
    */
   async startSession(): Promise<void> {
     if (this.#sessionReady) return
     if (!this.#sessionFlight) {
       this.#sessionFlight = (async (): Promise<void> => {
+        const actual = await assertServerIdentity(this.#baseUrl, this.#expectedFingerprint)
         await readJson(
           await fetch(`${this.#baseUrl}/api/session`, {
             method: 'POST',
             headers: this.#headers()
           })
         )
-        const identity = await readJson<{ fingerprint?: unknown }>(
-          await fetch(`${this.#baseUrl}/api/fingerprint`)
-        )
-        const actual = typeof identity.fingerprint === 'string' ? identity.fingerprint : null
-        if (this.#expectedFingerprint !== null && actual !== this.#expectedFingerprint) {
-          throw new ServerIdentityChangedError()
-        }
         if (this.#expectedFingerprint === null && actual !== null) {
           this.#expectedFingerprint = actual
           saveServerCredentials(this.#storage, {

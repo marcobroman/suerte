@@ -40,6 +40,16 @@ describe('CoverCache', () => {
     expect(cache.get('overflow.mp3')).toBe('data:x')
   })
 
+  it('evicts oldest-first under a byte budget', () => {
+    const cache = new CoverCache(16)
+    cache.set('a.mp3', 'data:12345678')
+    expect(cache.get('a.mp3')).toBe('data:12345678')
+
+    cache.set('b.mp3', 'data:12345678')
+    expect(cache.get('a.mp3')).toBeUndefined()
+    expect(cache.get('b.mp3')).toBe('data:12345678')
+  })
+
   it('clears', () => {
     const cache = new CoverCache()
     cache.set('a.mp3', 'data:x')

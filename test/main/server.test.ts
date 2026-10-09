@@ -370,6 +370,22 @@ describe('library server', () => {
     expect(chunk.done).toBe(true)
   })
 
+  it('drops master-credential subscriptions on demand', async () => {
+    await start()
+    const events = await fetch(`${base}/api/events?token=${TOKEN}`, {
+      headers: { accept: 'text/event-stream' }
+    })
+    expect(events.status).toBe(200)
+    const body = events.body
+    if (!body) throw new Error('expected a stream body')
+    const pending = body.getReader().read()
+
+    server?.dropMasterSubscribers()
+
+    const chunk = await pending
+    expect(chunk.done).toBe(true)
+  })
+
   it('serves the fingerprint publicly for trust binding', async () => {
     await start()
 
