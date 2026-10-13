@@ -1,5 +1,4 @@
 import { join } from 'node:path'
-import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { app, BrowserWindow, shell } from 'electron'
@@ -8,7 +7,8 @@ import { electronSecretBox } from './secrets'
 import { ensureServerCert } from './cert'
 import { createIpcContext, registerIpc, rescan, serverConfigOf } from './ipc'
 import { createLibraryServer, selectServerTransport } from './server'
-import { readCoverDataUrl } from './library/covers'
+import { mintTokenHex } from './server/credentials'
+import { readCoverBytes } from './library/covers'
 
 // Resolved eagerly because app.getPath is unavailable until the app is ready.
 const userDataDir = app.getPath('userData')
@@ -110,7 +110,7 @@ app.whenReady().then(async () => {
       missingRoots: ipcContext.missingRoots,
       scanning: ipcContext.scanning
     }),
-    readCover: (path) => readCoverDataUrl(path, ipcContext.covers),
+    readCover: (path) => readCoverBytes(path, ipcContext.covers),
     getRoots: () => ipcContext.roots,
     getClientDir: () => {
       // The dev tree has an index.html too, but only a built client (with an
@@ -128,7 +128,7 @@ app.whenReady().then(async () => {
       if (ipcContext.serverConfig.token === undefined) {
         ipcContext.serverConfig = {
           ...ipcContext.serverConfig,
-          token: randomBytes(32).toString('hex')
+          token: mintTokenHex()
         }
         await persistServerState()
       }

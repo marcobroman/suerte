@@ -20,6 +20,46 @@ export interface CoverArtProps {
 }
 
 /**
+ * One shared observer for every tile instead of one per tile: same 250px
+ * pre-load margin and same fire-once semantics, without O(tiles) observers.
+ * Module state is a plain element→callback map; StrictMode remounts simply
+ * re-observe through the effect cleanup below.
+ */
+type VisibilityCallback = () => void
+const watched = new Map<Element, VisibilityCallback>()
+let sharedObserver: IntersectionObserver | null = null
+
+function observeVisibility(node: Element, onVisible: VisibilityCallback): () => void {
+  if (typeof IntersectionObserver === 'undefined') {
+    onVisible()
+    return () => undefined
+  }
+  if (!sharedObserver) {
+    sharedObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue
+          const show = watched.get(entry.target)
+          if (show) {
+            watched.delete(entry.target)
+            sharedObserver?.unobserve(entry.target)
+            show()
+          }
+        }
+      },
+      { rootMargin: '250px' }
+    )
+  }
+  const observer = sharedObserver
+  watched.set(node, onVisible)
+  observer.observe(node)
+  return () => {
+    watched.delete(node)
+    observer.unobserve(node)
+  }
+}
+
+/**
  * Artwork is only fetched once the tile is near the viewport. A large library has
  * hundreds of albums, and each miss re-parses metadata in the main process.
  */
@@ -47,20 +87,7 @@ export function CoverArt({
     }
     const node = ref.current
     if (!node) return
-    if (typeof IntersectionObserver === 'undefined') {
-      setVisible(true)
-      return
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (!entries.some((entry) => entry.isIntersecting)) return
-        setVisible(true)
-        observer.disconnect()
-      },
-      { rootMargin: '250px' }
-    )
-    observer.observe(node)
-    return () => observer.disconnect()
+    return observeVisibility(node, () => setVisible(true))
   }, [eager])
 
   const url = useCover(useCoverStore(), visible ? path : null)

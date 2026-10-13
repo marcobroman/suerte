@@ -25,11 +25,12 @@ export interface EngineStatus {
 }
 
 /**
- * Shared status snapshot for both engines: same queue/eq copies, same
- * fields, so desktop and phone UIs read identical shapes. The caller
- * supplies its own position (buffer clock vs element clock differ); every
- * other value passes through by value. Copies stay inside (fresh queue and
- * EQ arrays per snapshot) exactly as each engine built them before.
+ * Shared status snapshot for both engines: identical shapes, so desktop and
+ * phone UIs read the same fields. The queue and EQ pass through by reference
+ * — both engines replace (never mutate in place) `#queue`/`#eq`, and track
+ * objects were already shared, so snapshots stay valid snapshots. Consumers
+ * must treat them as read-only (the types say so). The caller supplies its
+ * own position (buffer clock vs element clock differ).
  */
 export function buildStatus(
   queue: readonly Track[],
@@ -48,9 +49,9 @@ export function buildStatus(
     state,
     track,
     index,
-    queue: [...queue],
+    queue,
     queueLength: queue.length,
-    eq: { ...eq, bandGainsDb: [...eq.bandGainsDb] },
+    eq,
     repeat,
     shuffle,
     positionSec,
@@ -73,9 +74,9 @@ export const DEFAULT_BUFFER_CACHE_SIZE = 5
 
 /**
  * Starting at or after the buffer length yields silence or throws, so offsets are
- * held a hair below the end.
+ * held a hair below the end. Shared with the streaming twin (same guard, same meaning).
  */
-const END_GUARD_SEC = 0.01
+export const END_GUARD_SEC = 0.01
 
 export class PlaybackEngine {
   readonly #options: EngineOptions

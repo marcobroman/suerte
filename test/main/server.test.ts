@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { get as httpsGet, request as httpsRequest } from 'node:https'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import NodeID3 from 'node-id3'
-import { CoverCache, readCoverDataUrl } from '@main/library/covers'
+import { CoverCache, readCoverBytes, type CoverImage } from '@main/library/covers'
 import { ensureServerCert } from '@main/cert'
 import { clientPathIn, createLibraryServer, bucketIp, insideRoots, lanBaseUrl, lanBaseUrls, selectServerTransport, trackId, type LibraryServer } from '@main/server'
 import { writeTrackTags } from '@main/library/tags'
@@ -126,7 +126,7 @@ describe('library server', () => {
     initial: { id: string; createdAt: number; lastSeen?: number }[] = [],
     initialDevices: { token: string; name: string; createdAt: number; lastSeen: number }[] = [],
     tls: { cert: string; key: string } | null = null,
-    readCoverImpl: ((path: string) => Promise<string | null>) | null = null,
+    readCoverImpl: ((path: string) => Promise<CoverImage | null>) | null = null,
     extraPaths: string[] = []
   ): Promise<string> {
     const covers = new CoverCache()
@@ -184,7 +184,7 @@ describe('library server', () => {
         return Promise.resolve()
       },
       getSummary: () => summary,
-      readCover: (path) => (readCoverImpl ?? ((p) => readCoverDataUrl(p, covers)))(path),
+      readCover: (path) => (readCoverImpl ?? ((p) => readCoverBytes(p, covers)))(path),
       getRoots: () => [dir],
       getClientDir: () => clientDir
     })
@@ -817,7 +817,7 @@ describe('library server', () => {
   })
 
   it('refuses hostile cover types instead of reflecting them', async () => {
-    const hostile = `data:text/html;base64,${Buffer.from('<script>alert(1)</script>').toString('base64')}`
+    const hostile: CoverImage = { mime: 'text/html', bytes: Buffer.from('<script>alert(1)</script>') }
     await start([], [], null, () => Promise.resolve(hostile))
     const id = trackId(join(dir, 'song.mp3'))
 

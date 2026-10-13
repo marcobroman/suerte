@@ -1,7 +1,7 @@
 import type { EqSettings, Track } from '@shared/types'
 import { ISO_BAND_FREQUENCIES } from './bands'
 import type { EngineStatus, RepeatMode } from './engine'
-import { buildStatus, clampRange } from './engine'
+import { buildStatus, clampRange, END_GUARD_SEC } from './engine'
 import type { MediaElementLike, PlaybackGraph } from './graph'
 import { clampMasterVolume, defaultEqSettings } from './settings'
 
@@ -558,9 +558,3 @@ export class StreamEngine {
     for (const listener of this.#listeners) listener(snapshot)
   }
 }
-
-/**
- * Starting at or after the buffer length yields silence or throws, so offsets are
- * held a hair below the end.
- */
-const END_GUARD_SEC = 0.01

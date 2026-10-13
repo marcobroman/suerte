@@ -12,6 +12,17 @@ const STORE_FLUSH_THROTTLE_MS = MINUTE_MS
  * far past online guessing inside a 10-minute single-use window. */
 const PAIRING_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ'
 const PAIRING_CODE_TTL_MS = 10 * MINUTE_MS
+/** Outstanding codes cap: a stuck-open QR screen must not accumulate codes without bound. */
+const MAX_PAIRING_CODES = 10
+/** Raw bytes per pairing code (mapped through the alphabet, ≈45 bits). */
+const PAIRING_CODE_BYTES = 9
+/** Raw bytes per hex token (server token, session id, device token). */
+const SERVER_TOKEN_BYTES = 32
+
+/** Mints a hex token of the standard server-token size. */
+export function mintTokenHex(bytes: number = SERVER_TOKEN_BYTES): string {
+  return randomBytes(bytes).toString('hex')
+}
 
 /** Short-lived single-use pairing code minted for the QR/link flow. */
 export interface PairingCode {
@@ -34,7 +45,7 @@ export interface CredentialsDeps {
 
 /**
  * Owns every credential store: sessions, devices, and pairing codes, with
- * their persistence and lifetimes. The server closure holds one instance
+ * their persistence and lifetimes. createLibraryServer holds one instance
  * and delegates; auth helpers receive the instance itself as their
  * CredentialStores (same maps, dirty flags routed back through callbacks).
  */
@@ -118,7 +129,7 @@ export class CredentialsStore implements CredentialStores {
       if (now - issuedAt > PAIRING_CODE_TTL_MS) this.pairings.delete(code)
     }
     // A stuck-open QR screen must not accumulate codes without bound.
-    while (this.pairings.size > 10) {
+    while (this.pairings.size > MAX_PAIRING_CODES) {
       const oldest = this.pairings.keys().next()
       if (oldest.done) break
       this.pairings.delete(oldest.value)
@@ -142,7 +153,7 @@ export class CredentialsStore implements CredentialStores {
    */
   issuePairingCode(): PairingCode {
     this.sweepPairings()
-    const bytes = randomBytes(9)
+    const bytes = randomBytes(PAIRING_CODE_BYTES)
     let code = ''
     for (const byte of bytes) {
       const char = PAIRING_CODE_ALPHABET[byte % PAIRING_CODE_ALPHABET.length]
@@ -169,7 +180,7 @@ export class CredentialsStore implements CredentialStores {
       if (!sessionAlive(session, now)) this.sessions.delete(id)
     }
     this.sessionsDirty = false
-    const id = randomBytes(32).toString('hex')
+    const id = mintTokenHex()
     this.sessions.set(id, { createdAt: now, lastSeen: now })
     await this.persistSessions()
     // An expired device knocking above was just reaped in memory; write that

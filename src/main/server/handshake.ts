@@ -11,6 +11,8 @@ import { bucketIp } from './net'
  */
 const RATE_LIMIT_MAX = 10
 const RATE_LIMIT_WINDOW_MS = MINUTE_MS
+/** Bucket-map cap: expired buckets are swept lazily, so bound the map itself. */
+const RATE_LIMIT_BUCKETS_MAX = 1024
 
 export function handshakeAllowed(
   seen: Map<string, { count: number; resetAt: number }>,
@@ -20,7 +22,7 @@ export function handshakeAllowed(
   // One bucket per peer: fold IPv6-mapped IPv4 (`::ffff:1.2.3.4`) onto the
   // address it is, or one stack split-brains the limit.
   const ip = bucketIp(request)
-  if (seen.size > 1024) {
+  if (seen.size > RATE_LIMIT_BUCKETS_MAX) {
     for (const [key, entry] of seen) {
       if (now >= entry.resetAt) seen.delete(key)
     }
@@ -38,8 +40,8 @@ export function handshakeAllowed(
 }
 
 /** Login cookie name. HttpOnly so page JS can never steal it; SameSite=Strict
- * so cross-site pages cannot ride it. (`Secure` arrives with TLS in Phase 3 —
- * plain HTTP on the LAN cannot set it.) */
+ * so cross-site pages cannot ride it. (`Secure` is set only when serving
+ * over TLS — plain HTTP cannot set it.) */
 export const SESSION_COOKIE = 'onda_session'
 
 /**

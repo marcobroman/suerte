@@ -35,9 +35,18 @@ export function normalizeCoverMime(format: string): string | null {
  * where decoding images would dominate parse time. Albums share artwork, so this
  * fills slowly in practice; the budget keeps hostile files from pinning bulk
  * memory (64 entries by count, 64 MB by bytes — oldest evicted first).
+ *
+ * Entries are raw bytes, not data URLs: base64 inflates images ~33% and forced
+ * a decode on every serve. The data-URL form is built only at the IPC boundary
+ * that needs it (desktop `<img>` tags); the LAN server streams bytes directly.
  */
+export interface CoverImage {
+  readonly mime: string
+  readonly bytes: Buffer
+}
+
 export class CoverCache {
-  readonly #entries = new Map<string, string | null>()
+  readonly #entries = new Map<string, CoverImage | null>()
   readonly #sizes = new Map<string, number>()
   #bytes = 0
   readonly #maxBytes: number
@@ -47,23 +56,23 @@ export class CoverCache {
   }
 
   /** `undefined` means never looked up, `null` means known to have no artwork. */
-  get(path: string): string | null | undefined {
+  get(path: string): CoverImage | null | undefined {
     return this.#entries.get(path)
   }
 
-  set(path: string, dataUrl: string | null): void {
+  set(path: string, image: CoverImage | null): void {
     const previous = this.#sizes.get(path)
     if (previous !== undefined) {
       this.#bytes -= previous
       this.#sizes.delete(path)
       this.#entries.delete(path)
     }
-    if (dataUrl === null) {
+    if (image === null) {
       this.#entries.set(path, null)
       this.#sizes.set(path, 0)
       return
     }
-    const size = Buffer.byteLength(dataUrl, 'utf8')
+    const size = image.bytes.length
     // Evict oldest-first until the newcomer fits; the count cap catches
     // swarms of tiny entries the byte budget would never notice.
     while (
@@ -76,7 +85,7 @@ export class CoverCache {
       this.#sizes.delete(oldest.value)
       this.#entries.delete(oldest.value)
     }
-    this.#entries.set(path, dataUrl)
+    this.#entries.set(path, image)
     this.#sizes.set(path, size)
     this.#bytes += size
   }
@@ -92,10 +101,10 @@ export class CoverCache {
   }
 }
 
-export async function readCoverDataUrl(
+export async function readCoverBytes(
   trackPath: string,
   cache: CoverCache
-): Promise<string | null> {
+): Promise<CoverImage | null> {
   const cached = cache.get(trackPath)
   if (cached !== undefined) return cached
 
@@ -105,14 +114,22 @@ export async function readCoverDataUrl(
     const mime = picture ? normalizeCoverMime(picture.format) : null
     // Unbounded pictures balloon the cache and every cover response; refuse
     // the absurd ones outright (a 12 MB JPEG is already far past artwork).
-    const dataUrl =
+    const image =
       picture && mime && picture.data.length <= MAX_COVER_BYTES
-        ? `data:${mime};base64,${Buffer.from(picture.data).toString('base64')}`
+        ? { mime, bytes: Buffer.from(picture.data) }
         : null
-    cache.set(trackPath, dataUrl)
-    return dataUrl
+    cache.set(trackPath, image)
+    return image
   } catch {
     cache.set(trackPath, null)
     return null
   }
+}
+
+export async function readCoverDataUrl(
+  trackPath: string,
+  cache: CoverCache
+): Promise<string | null> {
+  const image = await readCoverBytes(trackPath, cache)
+  return image ? `data:${image.mime};base64,${image.bytes.toString('base64')}` : null
 }

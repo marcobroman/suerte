@@ -36,10 +36,10 @@ export interface StoredDevice {
 }
 
 /**
- * Credential stores owned by the server closure. Auth helpers take these as
- * parameters instead of closing over server state, so they stay unit-testable
- * without HTTP. Dirty markers route through callbacks because the throttle
- * bookkeeping lives with the stores.
+ * Credential stores owned by CredentialsStore. Auth helpers take these as
+ * parameters instead of closing over createLibraryServer locals, so they
+ * stay unit-testable without HTTP. Dirty markers route through callbacks
+ * because the throttle bookkeeping lives with the stores.
  */
 export interface CredentialStores {
   readonly sessions: Map<string, SessionRecord>

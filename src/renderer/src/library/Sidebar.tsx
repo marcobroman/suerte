@@ -1,6 +1,6 @@
 import type { Artist } from '@shared/types'
 import { formatCount } from '../format'
-import { albumsForArtist, coverPathForAlbum, type LibraryIndex, type Selection } from './view'
+import { coverPathForAlbum, firstAlbumForArtist, type LibraryIndex, type Selection } from './view'
 import { CoverArt } from './CoverArt'
 
 /** Last path segment, handling both separators since the renderer has no node:path. */
@@ -75,7 +75,7 @@ export function Sidebar({
           </p>
         )}
         {artists.map((artist) => {
-          const first = albumsForArtist(index, artist.name)[0]
+          const first = firstAlbumForArtist(index, artist)
           const isActive =
             activeArtist === artist.name ||
             (first !== undefined && activeAlbumKey === first.key)

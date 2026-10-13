@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { MAX_DEVICE_NAME_LENGTH } from '@shared/types'
+import { DEFAULT_SERVER_PORT, MAX_DEVICE_NAME_LENGTH } from '@shared/types'
 import { HttpBackend, exchangePairingCode } from '../http-backend'
 
 /**
@@ -247,7 +247,7 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
           inputMode="url"
           value={baseUrl}
           onChange={(event) => setBaseUrl(event.target.value)}
-          placeholder="http://192.168.1.5:4280"
+          placeholder={`http://192.168.1.5:${DEFAULT_SERVER_PORT}`}
           autoComplete="off"
         />
         <label className="boot-label" htmlFor="boot-token">

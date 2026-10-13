@@ -170,7 +170,8 @@ export interface ServerStatus {
    * Explicit opt-in to serve plain HTTP when the certificate is missing or
    * broken. Off means fail closed: enabled but certless stays stopped.
    */
-  readonly allowInsecure: boolean  /** Every reachable base URL (LAN plus tailnet when present), else []. */
+  readonly allowInsecure: boolean
+  /** Every reachable base URL (LAN plus tailnet when present), else []. */
   readonly urls: readonly string[]
   /** True while clients are served over TLS. */
   readonly secure: boolean

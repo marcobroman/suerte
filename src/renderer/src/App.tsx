@@ -17,15 +17,16 @@ import { ThemeMenu } from './library/ThemeMenu'
 import { ServerSettingsMenu } from './library/ServerSettingsMenu'
 import { autoTagFilesOf, buildAutoTagQuery } from './library/autotag'
 import { eqPresetById } from './library/eqPresets'
-import { defaultEqSettings, normalizeEqSettings } from './audio/settings'
+import { defaultEqSettings, EQ_SAVE_DEBOUNCE_MS, normalizeEqSettings } from './audio/settings'
 import { useServerAdmin, type ServerAdmin } from './useServerAdmin'
 import { usePairing } from './usePairing'
 import {
   ALL_SELECTION,
   ALBUM_SORT_OPTIONS,
   buildLibraryIndex,
-  matchTrack,
+  filterTracksByTitle,
   resolveView,
+  SEARCH_DEBOUNCE_MS,
   selectionForAlbum,
   sortAlbums,
   tracksForAlbum,
@@ -52,6 +53,13 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
     resolveTheme(document.documentElement.dataset.theme)
   )
   const [query, setQuery] = useState('')
+  // Filters run on a debounced query so each keystroke doesn't re-scan the
+  // library; the input itself stays immediate.
+  const [debouncedQuery, setDebouncedQuery] = useState('')
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query), SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [query])
   const [scanStatus, setScanStatus] = useState('no library yet')
   const [busy, setBusy] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -60,9 +68,10 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
   const [tokenBusy, setTokenBusy] = useState(false)
   const [tokenMessage, setTokenMessage] = useState('')
   // Ref bridge for the two server hooks (see usePairing's GetServerAdmin):
-  // pairing jobs only run on clicks, always after this commit, so the ref
-  // is populated by the time any getter call happens. Assigned during render
-  // because no effect runs before a (nonexistent) render-time job could.
+  // pairing jobs only run on clicks, always after commit, so the ref is
+  // populated by the time any getter call happens. Assigned in an effect
+  // (not during render) so concurrent rendering stays safe; the throw in
+  // getAdmin is the backstop.
   const adminRef = useRef<ServerAdmin | null>(null)
   const getAdmin = useCallback((): ServerAdmin => {
     const admin = adminRef.current
@@ -71,7 +80,9 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
   }, [])
   const pairing = usePairing(backend, getAdmin)
   const admin = useServerAdmin(backend, pairing.qr)
-  adminRef.current = admin
+  useEffect(() => {
+    adminRef.current = admin
+  }, [admin])
   const { serverBusy, setServerBusy, refreshServerState } = admin
   const { qrCode, hideQrCode } = pairing
   const [sortKey, setSortKey] = useState<AlbumSortKey>('artist')
@@ -95,21 +106,20 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
     () => buildLibraryIndex(summary?.tree ?? { artists: [], albums: [] }, summary?.tracks ?? []),
     [summary]
   )
-  const view = useMemo(() => resolveView(index, selection, query), [index, selection, query])
+  const view = useMemo(() => resolveView(index, selection, debouncedQuery), [index, selection, debouncedQuery])
 
   // A non-empty search takes over the content area with global results, so there
   // is no need to navigate back to All albums to filter the library. Clearing
   // the query restores whatever was being viewed.
-  const searching = query.trim() !== ''
+  const searching = debouncedQuery.trim() !== ''
   const searchView = useMemo(
-    () => resolveView(index, ALL_SELECTION, query),
-    [index, query]
+    () => resolveView(index, ALL_SELECTION, debouncedQuery),
+    [index, debouncedQuery]
   )
   const searchTracks = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    if (needle === '') return []
-    return (summary?.tracks ?? []).filter((track) => matchTrack(track, needle))
-  }, [summary, query])
+    const needle = debouncedQuery.trim().toLowerCase()
+    return filterTracksByTitle(index, summary?.tracks ?? [], needle)
+  }, [index, summary, debouncedQuery])
 
   const playbackRef = useRef(playback)
   playbackRef.current = playback
@@ -119,6 +129,16 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
 
   useEffect(() => {
     const unsubscribeProgress = backend.onScanProgress((progress) => {
+      if (progress.currentPath === '') {
+        // Final report of a scan run (only it carries an empty path): the
+        // library event follows solely when something changed, so settle a
+        // still-scanning status here. Anything else showing (cancellation,
+        // errors, folder actions) is left alone.
+        setScanStatus((current) =>
+          current.startsWith('scanning') ? 'library updated' : current
+        )
+        return
+      }
       setScanStatus(
         progress.total > 0 ? `scanning ${progress.scanned}/${progress.total}` : 'scanning'
       )
@@ -511,7 +531,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
         },
         () => undefined
       )
-    }, 500)
+    }, EQ_SAVE_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [settingsLoaded, playback.status.eq, backend])
 
@@ -556,6 +576,13 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
       ? searchTracks.length > 0 || searchView.albums.length > 0
       : view.tracks.length > 0)
 
+  // Playhead reader for the now-playing bar: stable once the engine exists,
+  // so the bar's per-frame clock never re-subscribes on App renders.
+  const getPosition = useCallback(
+    () => playback.engine?.position() ?? 0,
+    [playback.engine]
+  )
+
   const toggleSortDir = useCallback(() => {
     setSortDir((dir) => (dir === 'asc' ? 'desc' : 'asc'))
   }, [])
@@ -589,7 +616,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
       ? `${view.albums.length} ${view.albums.length === 1 ? 'album' : 'albums'}`
       : selection.kind === 'album'
         ? (album?.artist ?? '')
-        : query.trim() === ''
+        : debouncedQuery.trim() === ''
           ? `${index.tree.albums.length} in your library`
           : `${view.albums.length} of ${index.tree.albums.length} in your library`
 
@@ -612,7 +639,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
           albumCount={index.tree.albums.length}
           trackCount={summary?.trackCount ?? 0}
           missingRoots={summary?.missingRoots ?? []}
-          query={query}
+          query={debouncedQuery}
           phone={phone}
           onCoverError={probeCovers}
           onSelect={select}
@@ -758,7 +785,6 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
                         </button>
                       </>
                     )}
-                    <p className="settings-label">Theme</p>
                     <ThemeMenu
                       current={theme}
                       onSelect={(id) => {
@@ -776,7 +802,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
             {searching ? (
               <>
                 <div className="content-header">
-                  <h1>Results for “{query.trim()}”</h1>
+                  <h1>Results for “{debouncedQuery.trim()}”</h1>
                   <p className="content-sub">
                     {searchView.albums.length}{' '}
                     {searchView.albums.length === 1 ? 'album' : 'albums'} ·{' '}
@@ -904,7 +930,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
                 />
                 <AlbumGrid
                   albums={sortedBrowseAlbums}
-                  query={query}
+                  query={debouncedQuery}
                   phone={phone}
                   onCoverError={probeCovers}
                   onOpen={openAlbum}
@@ -915,10 +941,10 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
                 />
               </>
             ) : (
-              <AlbumView
-                album={album}
-                tracks={view.tracks}
-                query={query}
+                <AlbumView
+                  album={album}
+                  tracks={view.tracks}
+                  query={debouncedQuery}
                 phone={phone}
                 onCoverError={probeCovers}
                 currentPath={playback.status.track?.path ?? null}
@@ -965,15 +991,15 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
               queue={playback.status.queue}
               currentIndex={playback.status.index}
               playing={playback.status.state === 'playing'}
-              onPlayAt={(queueIndex) => void playback.playAt(queueIndex)}
-              onRemoveAt={(queueIndex) => playback.removeAt(queueIndex)}
+              onPlayAt={playback.playAt}
+              onRemoveAt={playback.removeAt}
             />
           </section>
         )}
         <NowPlayingBar
           track={playback.status.track}
           state={playback.status.state}
-          positionSec={playback.positionSec}
+          getPosition={getPosition}
           durationSec={playback.status.durationSec}
           volume={playback.status.volume}
           canPlay={canPlay}

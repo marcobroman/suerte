@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import type { Album } from '@shared/types'
 import { CoverArt } from './CoverArt'
 import { OverflowMenu } from './OverflowMenu'
@@ -32,46 +33,87 @@ export function AlbumGrid({ albums, query, phone, onCoverError, onOpen, onPlay, 
   return (
     <ul className="album-grid">
       {albums.map((album) => (
-        <li key={album.key}>
-          <div className="album-card">
-            {/* Art and text are one button, so the whole tile opens the album. */}
-            <button
-              type="button"
-              className="card-open"
-              onClick={() => onOpen(album)}
-              aria-label={`Open ${album.title}`}
-            >
-              <span className="card-art">
-                <CoverArt path={coverPathForAlbum(album)} size={0} alt="" fill onError={onCoverError} />
-              </span>
-              <span className="card-title">{album.title}</span>
-              <span className="card-sub">
-                {album.year ?? '—'} · {album.trackPaths.length}{' '}
-                {album.trackPaths.length === 1 ? 'track' : 'tracks'}
-              </span>
-            </button>
-            <button
-              type="button"
-              className="card-play"
-              onClick={() => onPlay(album)}
-              aria-label={`Play ${album.title}`}
-              title="Play"
-            >
-              ▶
-            </button>
-            <OverflowMenu
-              ariaLabel={`More actions for ${album.title}`}
-              className="card-more"
-              items={[
-                { label: 'Play', onSelect: () => onPlay(album) },
-                { label: 'Play next', onSelect: () => onQueueNext(album) },
-                { label: 'Add to queue', onSelect: () => onQueueLast(album) },
-                ...(!phone ? [{ label: 'Auto-tag…', onSelect: () => onAutoTag(album) }] : [])
-              ]}
-            />
-          </div>
-        </li>
+        <AlbumTile
+          key={album.key}
+          album={album}
+          phone={phone}
+          onCoverError={onCoverError}
+          onOpen={onOpen}
+          onPlay={onPlay}
+          onQueueNext={onQueueNext}
+          onQueueLast={onQueueLast}
+          onAutoTag={onAutoTag}
+        />
       ))}
     </ul>
   )
 }
+
+interface AlbumTileProps {
+  readonly album: Album
+  readonly phone: boolean
+  readonly onCoverError?: () => void
+  onOpen(album: Album): void
+  onPlay(album: Album): void
+  onQueueNext(album: Album): void
+  onQueueLast(album: Album): void
+  onAutoTag(album: Album): void
+}
+
+/**
+ * One tile, memoized: album objects are referentially stable across renders
+ * (same index), so typing in search or toggling UI skips every unchanged
+ * tile instead of re-diffing the whole grid.
+ */
+const AlbumTile = memo(function AlbumTile({
+  album,
+  phone,
+  onCoverError,
+  onOpen,
+  onPlay,
+  onQueueNext,
+  onQueueLast,
+  onAutoTag
+}: AlbumTileProps) {
+  return (
+    <li>
+      <div className="album-card">
+        {/* Art and text are one button, so the whole tile opens the album. */}
+        <button
+          type="button"
+          className="card-open"
+          onClick={() => onOpen(album)}
+          aria-label={`Open ${album.title}`}
+        >
+          <span className="card-art">
+            <CoverArt path={coverPathForAlbum(album)} size={0} alt="" fill onError={onCoverError} />
+          </span>
+          <span className="card-title">{album.title}</span>
+          <span className="card-sub">
+            {album.year ?? '—'} · {album.trackPaths.length}{' '}
+            {album.trackPaths.length === 1 ? 'track' : 'tracks'}
+          </span>
+        </button>
+        <button
+          type="button"
+          className="card-play"
+          onClick={() => onPlay(album)}
+          aria-label={`Play ${album.title}`}
+          title="Play"
+        >
+          ▶
+        </button>
+        <OverflowMenu
+          ariaLabel={`More actions for ${album.title}`}
+          className="card-more"
+          items={[
+            { label: 'Play', onSelect: () => onPlay(album) },
+            { label: 'Play next', onSelect: () => onQueueNext(album) },
+            { label: 'Add to queue', onSelect: () => onQueueLast(album) },
+            ...(!phone ? [{ label: 'Auto-tag…', onSelect: () => onAutoTag(album) }] : [])
+          ]}
+        />
+      </div>
+    </li>
+  )
+})

@@ -1,5 +1,4 @@
-﻿import { randomBytes } from 'node:crypto'
-import { realpath } from 'node:fs/promises'
+﻿import { realpath } from 'node:fs/promises'
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { AUDIO_EXTENSIONS } from '@shared/audio-files'
 import { IPC, LIBRARY_CHANGED_CHANNEL, SCAN_PROGRESS_CHANNEL, type DiscogsArtOutcome, type DiscogsFailure, type DiscogsReleaseOutcome, type DiscogsSearchOutcome, type LibrarySummary, type TagUpdateItem, type TagUpdateOutcome } from '@shared/ipc'
@@ -15,6 +14,7 @@ import { findMissingRoots } from './library/roots'
 import { scanLibrary } from './library/scan'
 import { sanitizeTagEdits, writeTrackTags } from './library/tags'
 import { lanBaseUrl, lanBaseUrls, selectServerTransport, insideRoots, type LibraryServer } from './server'
+import { mintTokenHex } from './server/credentials'
 import { readAudioBytes } from './util/read-bytes'
 
 /** Bulk tag-edit cap: bounds one IPC round-trip, never a success guarantee. */
@@ -86,7 +86,8 @@ function broadcastLibrary(context: IpcContext): void {
   context.server?.pushLibraryChanged()
 }
 
-async function runScan(context: IpcContext): Promise<ScanResult> {  if (context.scanning) {
+async function runScan(context: IpcContext): Promise<ScanResult> {
+  if (context.scanning) {
     return { added: 0, changed: 0, removed: 0, failed: 0, cancelled: 0, durationMs: 0 }
   }
 
@@ -97,16 +98,28 @@ async function runScan(context: IpcContext): Promise<ScanResult> {  if (context.
       cache: context.cache,
       // cancelScan clears the flag; remaining files in the parse queue are skipped.
       isCancelled: () => !context.scanning,
-      onProgress: (progress) => sendProgress(progress.scanned, progress.total, progress.currentPath)
+      onProgress: (progress) => sendProgress(progress.scanned, progress.total, progress.currentPath),
+      previous: { tree: context.tree, tracks: context.tracks }
     })
+    const missingBefore = context.missingRoots
     context.tree = outcome.tree
     context.tracks = outcome.tracks
-    // Covers are cached by path with no mtime check, so any rescan — tag edits
-    // included — must drop them; they reload lazily on demand.
-    context.covers.clear()
     // Reported rather than pruned: a detached drive comes back on its own.
     context.missingRoots = await findMissingRoots(context.roots)
-    broadcastLibrary(context)
+    const missingSame =
+      missingBefore.length === context.missingRoots.length &&
+      missingBefore.every((root, index) => root === context.missingRoots[index])
+    // A clean scan changes nothing the renderer doesn't already show: skip
+    // the cover wipe and the broadcast (whose summary/SSE serialization is
+    // the expensive part). Anything added, changed, removed, failed, or
+    // cancelled — or a drive coming/going — still refreshes everything.
+    const { added, changed, removed, failed, cancelled } = outcome.result
+    if (added + changed + removed + failed + cancelled > 0 || !missingSame) {
+      // Covers are cached by path with no mtime check, so a changing rescan —
+      // tag edits included — must drop them; they reload lazily on demand.
+      context.covers.clear()
+      broadcastLibrary(context)
+    }
     return outcome.result
   } finally {
     context.scanning = false
@@ -269,7 +282,7 @@ export function registerIpc(context: IpcContext): void {
     context.scanning = false
   })
 
-ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
+  ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
     context.roots = context.roots.filter((root) => root !== path)
     await persistConfig()
     await runScan(context)
@@ -307,7 +320,7 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
     // No vault, no mint: a token that cannot be persisted would vanish on
     // quit anyway, and persisting it is impossible — leave it absent.
     if (on && context.serverConfig.token === undefined && context.secrets.available()) {
-      context.serverConfig = { ...context.serverConfig, token: randomBytes(32).toString('hex') }
+      context.serverConfig = { ...context.serverConfig, token: mintTokenHex() }
     }
     await persistConfig()
     // No vault, no server: tokens cannot be minted or kept safely, so the
@@ -384,7 +397,7 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
     // tokens would keep the old secret's access alive, defeating the rotation.
     context.serverConfig = {
       ...context.serverConfig,
-      token: randomBytes(32).toString('hex'),
+      token: mintTokenHex(),
       sessions: [],
       devices: []
     }
@@ -446,7 +459,8 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
     shell.showItemInFolder(await containedPath(context, path))
   })
 
-  ipcMain.handle(IPC.updateTags, async (_event, items: unknown): Promise<TagUpdateOutcome> => {    // Bulk edits never fail atomically: every file reports its own result.
+  // Bulk edits never fail atomically: every file reports its own result.
+  ipcMain.handle(IPC.updateTags, async (_event, items: unknown): Promise<TagUpdateOutcome> => {
     const results: TagWriteResult[] = []
     const list = Array.isArray(items) ? items.slice(0, MAX_TAG_UPDATE_ITEMS) : []
     for (const item of list) {

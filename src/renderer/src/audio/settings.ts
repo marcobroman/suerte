@@ -18,6 +18,10 @@ import {
 
 export const MASTER_VOLUME_MIN = 0
 export const MASTER_VOLUME_MAX = 1
+/** Out-of-the-box loudness; also the idle status and the unset fallback. */
+export const DEFAULT_MASTER_VOLUME = 0.85
+/** EQ persist debounce: slider drags settle before one config write. */
+export const EQ_SAVE_DEBOUNCE_MS = 500
 
 export function defaultEqSettings(): EqSettings {
   return {
@@ -26,7 +30,7 @@ export function defaultEqSettings(): EqSettings {
     autoPreamp: true,
     bassDb: 0,
     trebleDb: 0,
-    masterVolume: 0.85
+    masterVolume: DEFAULT_MASTER_VOLUME
   }
 }
 
@@ -64,7 +68,7 @@ export function normalizeEqSettings(
     autoPreamp: source.autoPreamp !== false,
     bassDb: clampShelfGain(finite(source.bassDb, 0)),
     trebleDb: clampShelfGain(finite(source.trebleDb, 0)),
-    masterVolume: clampMasterVolume(finite(source.masterVolume, 0.85))
+    masterVolume: clampMasterVolume(finite(source.masterVolume, DEFAULT_MASTER_VOLUME))
   }
 }
 

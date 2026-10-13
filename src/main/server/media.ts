@@ -2,7 +2,7 @@ import { createReadStream, promises as fs } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import { extensionOf } from '@shared/audio-files'
-import { ALLOWED_COVER_MIME, MAX_COVER_BYTES } from '../library/covers'
+import { ALLOWED_COVER_MIME, MAX_COVER_BYTES, type CoverImage } from '../library/covers'
 import { clientPathIn } from './paths'
 import { json } from './respond'
 
@@ -134,32 +134,29 @@ function pipeFile(
 export async function serveCover(
   path: string,
   response: ServerResponse,
-  readCover: (path: string) => Promise<string | null>
+  readCover: (path: string) => Promise<CoverImage | null>
 ): Promise<void> {
-  const dataUrl = await readCover(path)
-  const parsed = dataUrl ? /^data:([^;,]+);base64,(.*)$/s.exec(dataUrl) : null
+  const image = await readCover(path)
   // Defense in depth: extraction already filters, but a hostile MIME must
   // never reach the wire even if a future reader is lax. Non-images 404.
-  const mime = parsed?.[1]?.toLowerCase().trim() ?? ''
-  if (!parsed?.[2] || !ALLOWED_COVER_MIME.has(mime)) {
+  if (!image || !ALLOWED_COVER_MIME.has(image.mime)) {
     json(response, 404, { error: 'no cover art' })
     return
   }
-  const bytes = Buffer.from(parsed[2], 'base64')
-  if (bytes.length > MAX_COVER_BYTES) {
+  if (image.bytes.length > MAX_COVER_BYTES) {
     json(response, 404, { error: 'no cover art' })
     return
   }
   response.writeHead(200, {
-    'content-type': mime,
-    'content-length': bytes.length,
+    'content-type': image.mime,
+    'content-length': image.bytes.length,
     // Even an allowed image must not sniff or script: a direct navigation
     // to this URL renders in server origin.
     'x-content-type-options': 'nosniff',
     'content-security-policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'",
     'referrer-policy': 'no-referrer'
   })
-  response.end(bytes)
+  response.end(image.bytes)
 }
 
 export async function serveClient(
@@ -172,15 +169,19 @@ export async function serveClient(
     json(response, 404, { error: 'client not built' })
     return
   }
-  const sendFile = async (file: string, noStore: boolean): Promise<void> => {
+  const sendFile = async (file: string, noStore: boolean, size?: number): Promise<void> => {
     const headers: Record<string, string> = {
       'content-type': CLIENT_MIME[extensionOf(file)] ?? 'application/octet-stream'
     }
     if (noStore) headers['cache-control'] = 'no-store'
     try {
-      const stats = await fs.stat(file)
-      if (!stats.isFile()) throw new Error('not a file')
-      headers['content-length'] = String(stats.size)
+      const length =
+        size ??
+        (await fs.stat(file).then((stats) => {
+          if (!stats.isFile()) throw new Error('not a file')
+          return stats.size
+        }))
+      headers['content-length'] = String(length)
       response.writeHead(200, headers)
       pipeFile(file, null, request, response)
     } catch {
@@ -199,7 +200,7 @@ export async function serveClient(
   try {
     const stats = await fs.stat(file)
     if (stats.isFile()) {
-      await sendFile(file, false)
+      await sendFile(file, false, stats.size)
       return
     }
   } catch {

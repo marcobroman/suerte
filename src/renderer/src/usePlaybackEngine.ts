@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { EqSettings, Track } from '@shared/types'
 import { PlaybackEngine, type EngineStatus, type RepeatMode } from './audio/engine'
 import type { StreamEngine } from './audio/stream-engine'
 import { createWebAudioGraph } from './audio/web-audio-graph'
-import { defaultEqSettings } from './audio/settings'
+import { defaultEqSettings, DEFAULT_MASTER_VOLUME } from './audio/settings'
 
 export const IDLE_STATUS: EngineStatus = {
   state: 'idle',
@@ -16,13 +16,12 @@ export const IDLE_STATUS: EngineStatus = {
   shuffle: false,
   positionSec: 0,
   durationSec: 0,
-  volume: 0.85,
+  volume: DEFAULT_MASTER_VOLUME,
   error: null
 }
 
 export interface PlaybackControls {
   readonly status: EngineStatus
-  readonly positionSec: number
   readonly engine: PlaybackEngine | StreamEngine | null
   toggle(): void
   next(): void
@@ -72,8 +71,8 @@ export interface EngineControlsTarget {
  * Shared shell behind usePlaybackEngine/useStreamEngine: engine lifetime,
  * status subscription, per-frame position clock, and the control table.
  * Only engine construction differs per transport. The constructor rides a
- * ref (same idiom as the old readFileRef/backendRef mirrors) so the engine
- * is still created exactly once on mount.
+ * ref (the same ref-mirror idiom the two engine hooks use for their inputs)
+ * so the engine is still created exactly once on mount.
  */
 export function useEngineControls<E extends EngineControlsTarget>(
   create: () => E
@@ -82,7 +81,6 @@ export function useEngineControls<E extends EngineControlsTarget>(
   const createRef = useRef(create)
   createRef.current = create
   const [status, setStatus] = useState<EngineStatus>(IDLE_STATUS)
-  const [positionSec, setPositionSec] = useState(0)
 
   useEffect(() => {
     const engine = createRef.current()
@@ -96,80 +94,106 @@ export function useEngineControls<E extends EngineControlsTarget>(
     }
   }, [])
 
-  // The engine only reports on transitions, so the clock is sampled per frame
-  // while playing. The snapshot branch re-runs on every engine emit — not just
-  // state flips — so seeks made while paused visibly move the slider at once.
-  useEffect(() => {
-    if (status.state !== 'playing') {
-      setPositionSec(engineRef.current?.position() ?? 0)
-      return
-    }
-    let frame = 0
-    const tick = (): void => {
-      setPositionSec(engineRef.current?.position() ?? 0)
-      frame = requestAnimationFrame(tick)
-    }
-    frame = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(frame)
-  }, [status])
-
   const call = useCallback((action: (engine: E) => void) => {
     const engine = engineRef.current
     if (engine) action(engine)
   }, [])
 
-  return {
-    status,
-    positionSec,
-    engine: engineRef.current,
-    toggle: useCallback(() => call((engine) => void engine.toggle()), [call]),
-    next: useCallback(() => call((engine) => void engine.next()), [call]),
-    previous: useCallback(() => call((engine) => void engine.previous()), [call]),
-    seek: useCallback(
-      (position: number) => call((engine) => void engine.seek(position)),
-      [call]
-    ),
-    playAt: useCallback((index: number) => call((engine) => void engine.playAt(index)), [call]),
-    playQueue: useCallback(
-      (tracks: readonly Track[], startIndex = 0) =>
-        call((engine) => {
-          engine.setQueue(tracks, startIndex, false)
-          void engine.playAt(startIndex)
-        }),
-      [call]
-    ),
-    addNext: useCallback(
-      (tracks: readonly Track[]) => call((engine) => engine.addNext(tracks)),
-      [call]
-    ),
-    addLast: useCallback(
-      (tracks: readonly Track[]) => call((engine) => engine.addLast(tracks)),
-      [call]
-    ),
-    removeAt: useCallback(
-      (index: number) => call((engine) => engine.removeAt(index)),
-      [call]
-    ),
-    refreshTracks: useCallback(
-      (tracks: readonly Track[]) => call((engine) => engine.refreshTracks(tracks)),
-      [call]
-    ),
-    setEq: useCallback(
-      (settings: EqSettings) => call((engine) => engine.setEq(settings)),
-      [call]
-    ),
-    setRepeat: useCallback(
-      (mode: RepeatMode) => call((engine) => engine.setRepeat(mode)),
-      [call]
-    ),
-    cycleRepeat: useCallback(() => call((engine) => engine.cycleRepeat()), [call]),
-    setShuffle: useCallback(
-      (on: boolean) => call((engine) => engine.setShuffle(on)),
-      [call]
-    ),
-    toggleShuffle: useCallback(() => call((engine) => engine.toggleShuffle()), [call]),
-    setVolume: useCallback((volume: number) => call((engine) => engine.setVolume(volume)), [call])
-  }
+  // Individual actions stay referentially stable (all key on `call`), so the
+  // memoized table below only rebuilds when the engine instance or its
+  // status changes — never on the per-frame position clock, which now lives
+  // in NowPlayingBar next to the only slider that reads it.
+  const toggle = useCallback(() => call((engine) => void engine.toggle()), [call])
+  const next = useCallback(() => call((engine) => void engine.next()), [call])
+  const previous = useCallback(() => call((engine) => void engine.previous()), [call])
+  const seek = useCallback(
+    (position: number) => call((engine) => void engine.seek(position)),
+    [call]
+  )
+  const playAt = useCallback((index: number) => call((engine) => void engine.playAt(index)), [call])
+  const playQueue = useCallback(
+    (tracks: readonly Track[], startIndex = 0) =>
+      call((engine) => {
+        engine.setQueue(tracks, startIndex, false)
+        void engine.playAt(startIndex)
+      }),
+    [call]
+  )
+  const addNext = useCallback(
+    (tracks: readonly Track[]) => call((engine) => engine.addNext(tracks)),
+    [call]
+  )
+  const addLast = useCallback(
+    (tracks: readonly Track[]) => call((engine) => engine.addLast(tracks)),
+    [call]
+  )
+  const removeAt = useCallback(
+    (index: number) => call((engine) => engine.removeAt(index)),
+    [call]
+  )
+  const refreshTracks = useCallback(
+    (tracks: readonly Track[]) => call((engine) => engine.refreshTracks(tracks)),
+    [call]
+  )
+  const setEq = useCallback(
+    (settings: EqSettings) => call((engine) => engine.setEq(settings)),
+    [call]
+  )
+  const setRepeat = useCallback(
+    (mode: RepeatMode) => call((engine) => engine.setRepeat(mode)),
+    [call]
+  )
+  const cycleRepeat = useCallback(() => call((engine) => engine.cycleRepeat()), [call])
+  const setShuffle = useCallback(
+    (on: boolean) => call((engine) => engine.setShuffle(on)),
+    [call]
+  )
+  const toggleShuffle = useCallback(() => call((engine) => engine.toggleShuffle()), [call])
+  const setVolume = useCallback((volume: number) => call((engine) => engine.setVolume(volume)), [call])
+
+  const engine = engineRef.current
+  return useMemo(
+    () => ({
+      status,
+      engine,
+      toggle,
+      next,
+      previous,
+      seek,
+      playAt,
+      playQueue,
+      addNext,
+      addLast,
+      removeAt,
+      refreshTracks,
+      setEq,
+      setRepeat,
+      cycleRepeat,
+      setShuffle,
+      toggleShuffle,
+      setVolume
+    }),
+    [
+      status,
+      engine,
+      toggle,
+      next,
+      previous,
+      seek,
+      playAt,
+      playQueue,
+      addNext,
+      addLast,
+      removeAt,
+      refreshTracks,
+      setEq,
+      setRepeat,
+      cycleRepeat,
+      setShuffle,
+      toggleShuffle,
+      setVolume
+    ]
+  )
 }
 
 /**

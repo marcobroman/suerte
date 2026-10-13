@@ -5,8 +5,12 @@ export type CoverReader = (path: string) => Promise<string | null>
 /**
  * Session cache for artwork. Each miss costs a full metadata parse in the main
  * process, so results are memoised here too, and a path is only ever requested
- * once even if several components ask for it at the same time.
+ * once even if several components ask for it at the same time. Bounded
+ * oldest-first: entries are multi-hundred-KB strings, so an unbounded map
+ * would grow with every scrolled tile for the whole session.
  */
+export const MAX_COVER_STORE_ENTRIES = 100
+
 export class CoverStore {
   readonly #read: CoverReader
   readonly #entries = new Map<string, string | null>()
@@ -68,6 +72,14 @@ export class CoverStore {
 
   #settle(path: string, url: string | null): void {
     this.#pending.delete(path)
+    if (!this.#entries.has(path)) {
+      while (this.#entries.size >= MAX_COVER_STORE_ENTRIES) {
+        const oldest = this.#entries.keys().next()
+        if (oldest.done) break
+        this.#entries.delete(oldest.value)
+        this.#listeners.delete(oldest.value)
+      }
+    }
     this.#entries.set(path, url)
     const set = this.#listeners.get(path)
     if (!set) return

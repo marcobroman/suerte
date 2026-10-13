@@ -6,6 +6,11 @@ import { CoverCache, normalizeCoverMime, readCoverDataUrl } from '@main/library/
 import { createPngBytes, createWavBytes, createWavWithTagsBytes } from '../helpers'
 
 describe('CoverCache', () => {
+  const image = (mime = 'image/jpeg', bytes = 'AAA') => ({
+    mime,
+    bytes: Buffer.from(bytes)
+  })
+
   it('distinguishes never-seen from known-absent', () => {
     const cache = new CoverCache()
     expect(cache.get('a.mp3')).toBeUndefined()
@@ -14,45 +19,45 @@ describe('CoverCache', () => {
     expect(cache.get('a.mp3')).toBeNull()
   })
 
-  it('returns a stored data url', () => {
+  it('returns a stored cover image', () => {
     const cache = new CoverCache()
-    cache.set('a.mp3', 'data:image/jpeg;base64,AAA')
-    expect(cache.get('a.mp3')).toBe('data:image/jpeg;base64,AAA')
+    cache.set('a.mp3', image())
+    expect(cache.get('a.mp3')).toEqual(image())
   })
 
   it('replaces an existing entry without growing', () => {
     const cache = new CoverCache()
-    cache.set('a.mp3', 'data:image/jpeg;base64,AAA')
-    cache.set('a.mp3', 'data:image/png;base64,BBB')
+    cache.set('a.mp3', image())
+    cache.set('a.mp3', image('image/png', 'BBB'))
     expect(cache.size).toBe(1)
-    expect(cache.get('a.mp3')).toBe('data:image/png;base64,BBB')
+    expect(cache.get('a.mp3')).toEqual(image('image/png', 'BBB'))
   })
 
   it('evicts the oldest entry once full', () => {
     const cache = new CoverCache()
-    for (let i = 0; i < 64; i++) cache.set(`t${i}.mp3`, `data:${i}`)
+    for (let i = 0; i < 64; i++) cache.set(`t${i}.mp3`, image('image/png', `${i}`))
     expect(cache.size).toBe(64)
 
-    cache.set('overflow.mp3', 'data:x')
+    cache.set('overflow.mp3', image('image/png', 'x'))
     expect(cache.size).toBe(64)
     expect(cache.get('t0.mp3')).toBeUndefined()
-    expect(cache.get('t1.mp3')).toBe('data:1')
-    expect(cache.get('overflow.mp3')).toBe('data:x')
+    expect(cache.get('t1.mp3')).toEqual(image('image/png', '1'))
+    expect(cache.get('overflow.mp3')).toEqual(image('image/png', 'x'))
   })
 
   it('evicts oldest-first under a byte budget', () => {
     const cache = new CoverCache(16)
-    cache.set('a.mp3', 'data:12345678')
-    expect(cache.get('a.mp3')).toBe('data:12345678')
+    cache.set('a.mp3', image('image/png', '123456789'))
+    expect(cache.get('a.mp3')).toEqual(image('image/png', '123456789'))
 
-    cache.set('b.mp3', 'data:12345678')
+    cache.set('b.mp3', image('image/png', '123456789'))
     expect(cache.get('a.mp3')).toBeUndefined()
-    expect(cache.get('b.mp3')).toBe('data:12345678')
+    expect(cache.get('b.mp3')).toEqual(image('image/png', '123456789'))
   })
 
   it('clears', () => {
     const cache = new CoverCache()
-    cache.set('a.mp3', 'data:x')
+    cache.set('a.mp3', image('image/png', 'x'))
     cache.clear()
     expect(cache.size).toBe(0)
   })

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import type { Track } from '@shared/types'
 import type { EngineStatus, RepeatMode } from '../audio/engine'
 import { formatDuration } from '../format'
@@ -13,7 +14,8 @@ const REPEAT_LABELS: Record<RepeatMode, string> = {
 export interface NowPlayingBarProps {
   readonly track: Track | null
   readonly state: EngineStatus['state']
-  readonly positionSec: number
+  /** Reads the live playhead; called per frame while playing, so only this bar re-renders on ticks. */
+  getPosition(): number
   readonly durationSec: number
   readonly volume: number
   readonly canPlay: boolean
@@ -43,7 +45,7 @@ export interface NowPlayingBarProps {
 export function NowPlayingBar({
   track,
   state,
-  positionSec,
+  getPosition,
   durationSec,
   volume,
   canPlay,
@@ -66,6 +68,23 @@ export function NowPlayingBar({
   const playing = state === 'playing'
   const loading = state === 'loading'
   const duration = durationSec > 0 ? durationSec : (track?.durationSec ?? 0)
+  // Playhead clock lives here, next to the only slider that reads it: ticks
+  // re-render this footer alone instead of the whole app. While playing the
+  // rAF loop drives the slider; while paused the position is read on every
+  // render, so paused seeks (which re-render via engine emits) move the
+  // slider at once without depending on effect re-runs.
+  const [livePos, setLivePos] = useState(() => getPosition())
+  useEffect(() => {
+    if (!playing) return
+    let frame = 0
+    const tick = (): void => {
+      setLivePos(getPosition())
+      frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [playing, getPosition])
+  const positionSec = playing ? livePos : getPosition()
 
   return (
     <footer className="player">

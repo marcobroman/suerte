@@ -81,6 +81,11 @@ export class LibraryCache {
     return [...this.#entries.values()]
   }
 
+  /** Track paths without copying the entries; for set-building scans. */
+  *paths(): IterableIterator<string> {
+    for (const track of this.#entries.values()) yield track.path
+  }
+
   apply(plan: ReconcilePlan): void {
     for (const key of plan.staleKeys) this.#entries.delete(key)
   }

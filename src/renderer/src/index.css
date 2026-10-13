@@ -609,6 +609,15 @@ p {
   list-style: none;
 }
 
+/* Off-screen tiles skip rendering/layout until scrolled near: the browser
+ * keeps them in the accessibility tree and find-in-page, unlike manual
+ * virtualization. `auto` reuses each tile's last measured size so the
+ * scrollbar stays stable after first paint. */
+.album-grid > li {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 260px;
+}
+
 .album-card {
   position: relative;
   padding: 10px;

@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { MAX_DEVICE_NAME_LENGTH } from '@shared/types'
@@ -8,19 +7,21 @@ import { handshakeAllowed, readBody, SESSION_COOKIE } from './handshake'
 import { bucketIp } from './net'
 import { insideRoots } from './paths'
 import { serveCover, serveStream } from './media'
+import type { CoverImage } from '../library/covers'
 import { json } from './respond'
 import type { CredentialsStore } from './credentials'
+import { mintTokenHex } from './credentials'
 import type { EventHub } from './events'
 
 /** Browser keeps the login ~a year; the server itself never expires sessions. */
-const SESSION_MAX_AGE = 31536000
+const SESSION_MAX_AGE_SEC = 31536000
 /** Session handshake bodies are tiny JSON; anything bigger is abuse. */
 const SESSION_BODY_LIMIT = 4096
 
 /**
- * Everything endpoint handlers need from the server closure, passed
+ * Everything endpoint handlers need from createLibraryServer, passed
  * explicitly so routes stay testable without HTTP. Live getters (token,
- * TLS, roots, summary) route back through the closure.
+ * TLS, roots, summary) route back through it.
  */
 export interface RouterContext {
   credentials: CredentialsStore
@@ -28,7 +29,7 @@ export interface RouterContext {
   getMasterToken(): string | undefined
   getTls(): { cert: string; key: string } | null
   getRoots(): readonly string[]
-  readCover(path: string): Promise<string | null>
+  readCover(path: string): Promise<CoverImage | null>
   getClientDir(): string | null
   resolveTrackId(id: string): string | null
   publicSummary(): PublicLibrarySummary
@@ -76,7 +77,7 @@ async function handleSession(
   const cookieSecure = ctx.getTls() ? '; Secure' : ''
   response.writeHead(200, {
     'content-type': 'application/json; charset=utf-8',
-    'set-cookie': `${SESSION_COOKIE}=${id}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${SESSION_MAX_AGE}${cookieSecure}`
+    'set-cookie': `${SESSION_COOKIE}=${id}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${SESSION_MAX_AGE_SEC}${cookieSecure}`
   })
   response.end(JSON.stringify({ ok: true }))
 }
@@ -110,7 +111,7 @@ async function handlePair(
     return
   }
   ctx.credentials.burnPairingCode(code)
-  const token = randomBytes(32).toString('hex')
+    const token = mintTokenHex()
   const now = Date.now()
   await ctx.credentials.registerDevice(token, trimmedName, now)
   json(response, 200, { token })
@@ -220,6 +221,33 @@ export async function routePublic(
 }
 
 /**
+ * Canonical roots, memoized by roots-array identity (replaced wholesale on
+ * folder add/remove, so identity change means re-resolve). Only fully
+ * successful resolutions are cached: a reconnecting drive must self-heal on
+ * the next request, not stick on a cached omission. The per-FILE realpath
+ * below is deliberately NOT cached — it is the TOCTOU defense against
+ * symlinks swapped between requests.
+ */
+const canonicalRootsCache = new WeakMap<readonly string[], string[]>()
+
+async function canonicalRootsFor(roots: readonly string[]): Promise<string[]> {
+  const cached = canonicalRootsCache.get(roots)
+  if (cached) return cached
+  const canonicalRoots: string[] = []
+  let complete = true
+  for (const root of roots) {
+    try {
+      canonicalRoots.push(await fs.realpath(root))
+    } catch {
+      // Unreachable roots cannot contain anything right now.
+      complete = false
+    }
+  }
+  if (complete) canonicalRootsCache.set(roots, canonicalRoots)
+  return canonicalRoots
+}
+
+/**
  * Routes behind the auth gate: the caller authorized already and slid the
  * idle windows. True when answered; unknown /api/* paths 404 in dispatch.
  */
@@ -263,14 +291,7 @@ export async function routeAuthed(
     let canonical: string
     try {
       canonical = await fs.realpath(real)
-      const canonicalRoots: string[] = []
-      for (const root of ctx.getRoots()) {
-        try {
-          canonicalRoots.push(await fs.realpath(root))
-        } catch {
-          // Unreachable roots cannot contain anything right now.
-        }
-      }
+      const canonicalRoots = await canonicalRootsFor(ctx.getRoots())
       if (!insideRoots(canonicalRoots, canonical)) throw new Error('outside roots')
     } catch {
       json(response, 404, { error: 'not found' })

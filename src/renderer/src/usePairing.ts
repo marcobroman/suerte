@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import type { Backend } from './backend'
 import { phonePairUrl } from './http-backend'
-import type { ServerAdmin } from './useServerAdmin'
+import type { ServerAdmin, ServerAdminQr } from './useServerAdmin'
 
 /**
  * Lazy access to the server-admin hook. The two hooks need each other —
@@ -13,13 +13,17 @@ import type { ServerAdmin } from './useServerAdmin'
  */
 export type GetServerAdmin = () => ServerAdmin
 
+/** QR image size; scanned once by the phone camera, so small is fine. */
+const QR_CODE_WIDTH = 200
+const QR_CODE_MARGIN = 1
+
 export interface Pairing {
   readonly qrDataUrl: string | null
   readonly qrCode: string | null
   readonly qrBase: string | null
   readonly qrExpiry: number | null
-  /** Stable QR-clearing callbacks for the admin hook (burn discipline notes in 3j). */
-  readonly qr: { clearQrDataUrl(): void; clearQrDisplay(): void }
+  /** Stable QR-clearing callbacks for the admin hook (toggle clears the image only, regenerate clears all). */
+  readonly qr: ServerAdminQr
   hideQrCode(): void
   showQrCode(base: string): void
   renewQrCode(): void
@@ -181,8 +185,8 @@ export function usePairing(backend: Backend, getAdmin: GetServerAdmin): Pairing 
           setQrExpiry(pairing.expiresAt)
           setQrDataUrl(
             await QRCode.toDataURL(phonePairUrl(base, pairing.code, admin.serverState.fingerprint), {
-              width: 200,
-              margin: 1
+              width: QR_CODE_WIDTH,
+              margin: QR_CODE_MARGIN
             })
           )
         } catch {

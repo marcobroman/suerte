@@ -10,11 +10,12 @@ import { authorized } from './server/auth'
 import { CredentialsStore, type PairingCode } from './server/credentials'
 import { EventHub } from './server/events'
 import { serveClient } from './server/media'
+import type { CoverImage } from './library/covers'
 import { routeAuthed, routePublic, type RouterContext } from './server/routes'
 import { json } from './server/respond'
 
-// Moved to ./server/net.ts and ./server/paths.ts (Phase 3a); re-exported
-// here so existing importers (`@main/server` in tests, ipc, index) keep working.
+// Helpers live in ./server/*.ts; re-exported here so existing importers
+// (`@main/server` in tests, ipc, index) keep working.
 export {
   bucketIp,
   lanBaseUrl,
@@ -41,7 +42,7 @@ export interface LibraryServerDeps {
   /** Called on pair, revoke, drop, and throttled last-seen updates. */
   saveDevices(devices: readonly DeviceRecord[]): Promise<void>
   getSummary(): LibrarySummary
-  readCover(path: string): Promise<string | null>
+  readCover(path: string): Promise<CoverImage | null>
   getRoots(): readonly string[]
   /** Built renderer directory, or null when it was never built (dev mode). */
   getClientDir(): string | null
@@ -100,9 +101,10 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
   let server: Server | HttpsServer | null = null
   let listening = false
   let boundPort = 0
-  // Opaque id → real path, rebuilt only when the track list itself is replaced
-  // (i.e. on rescan); lookups in between are map hits.
-  let idCache: { tracks: readonly Track[]; byId: Map<string, string> } | null = null
+  // Opaque id ↔ real path, rebuilt only when the track list itself is replaced
+  // (i.e. on rescan); lookups in between are map hits. Shared by id
+  // resolution and the public summary so each track list hashes exactly once.
+  let idCache: { tracks: readonly Track[]; byPath: Map<string, string>; byId: Map<string, string> } | null = null
   // Handshake attempts per IP for the token bucket above. Never persisted.
   const handshakeAttempts = new Map<string, { count: number; resetAt: number }>()
 
@@ -126,7 +128,9 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
   /**
    * Every credential store in one place. Auth helpers receive the instance
    * itself as their CredentialStores; subscriber drops route back through
-   * the event hub below.
+   * the event hub below. NB: the drop adapter closes over `hub` (declared
+   * below) and runs only on later revoke/drop calls — keep this construction
+   * order (credentials first: the hub needs the instance, not vice versa).
    */
   const credentials = new CredentialsStore({
     getSessions: () => deps.getSessions(),
@@ -148,28 +152,44 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
     summarize: () => publicSummary()
   })
 
+  function trackIds(tracks: readonly Track[]): { byPath: Map<string, string>; byId: Map<string, string> } {
+    if (!idCache || idCache.tracks !== tracks) {
+      const byPath = new Map<string, string>()
+      const byId = new Map<string, string>()
+      for (const track of tracks) {
+        const id = trackId(track.path)
+        byPath.set(track.path, id)
+        byId.set(id, track.path)
+      }
+      idCache = { tracks, byPath, byId }
+    }
+    return idCache
+  }
+
   function resolveTrackId(id: string): string | null {
     if (!/^[0-9a-f]{64}$/.test(id)) return null
-    const tracks = deps.getSummary().tracks
-    if (!idCache || idCache.tracks !== tracks) {
-      const byId = new Map<string, string>()
-      for (const track of tracks) byId.set(trackId(track.path), track.path)
-      idCache = { tracks, byId }
-    }
-    return idCache.byId.get(id) ?? null
+    return trackIds(deps.getSummary().tracks).byId.get(id) ?? null
   }
+
+  // Memoized public summary: the track list is replaced wholesale on rescan
+  // and otherwise referentially stable, so rebuild only when the tracks (or
+  // the scanning flag phones display) change. Phones poll /api/library and
+  // every push re-summarizes — without this each call re-hashes N paths and
+  // re-serializes megabytes on the single-threaded main process.
+  let summaryCache: { tracks: readonly Track[]; scanning: boolean; summary: PublicLibrarySummary } | null = null
 
   function publicSummary(): PublicLibrarySummary {
     const summary = deps.getSummary()
-    const idByPath = new Map<string, string>()
-    const idOf = (path: string): string => {
-      const existing = idByPath.get(path)
-      if (existing) return existing
-      const id = trackId(path)
-      idByPath.set(path, id)
-      return id
+    if (
+      summaryCache &&
+      summaryCache.tracks === summary.tracks &&
+      summaryCache.scanning === summary.scanning
+    ) {
+      return summaryCache.summary
     }
-    return {
+    const byPath = trackIds(summary.tracks).byPath
+    const idOf = (path: string): string => byPath.get(path) ?? trackId(path)
+    const built: PublicLibrarySummary = {
       tree: {
         artists: summary.tree.artists,
         albums: summary.tree.albums.map((album) => ({
@@ -181,11 +201,13 @@ export function createLibraryServer(deps: LibraryServerDeps): LibraryServer {
       trackCount: summary.trackCount,
       scanning: summary.scanning
     }
+    summaryCache = { tracks: summary.tracks, scanning: summary.scanning, summary: built }
+    return built
   }
 
   /**
    * Everything endpoint handlers need, built once: live getters route back
-   * through the closure so routes stay stateless.
+   * through createLibraryServer so routes stay stateless.
    */
   const routerCtx: RouterContext = {
     credentials,

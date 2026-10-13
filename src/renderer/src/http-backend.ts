@@ -8,7 +8,7 @@ import type {
   TagUpdateOutcome
 } from '@shared/ipc'
 import type { AppSettings, ScanResult } from '@shared/types'
-import { DEFAULT_SERVER_PORT, SECOND_MS, isThemeId } from '@shared/types'
+import { DEFAULT_SERVER_PORT, DEFAULT_THEME, SECOND_MS, isThemeId } from '@shared/types'
 import { normalizeEqSettings } from './audio/settings'
 import type { Backend } from './backend'
 
@@ -536,7 +536,7 @@ export class HttpBackend implements Backend {
       }
     }
     return {
-      theme: isThemeId(storedTheme) ? storedTheme : 'spotlight',
+      theme: isThemeId(storedTheme) ? storedTheme : DEFAULT_THEME,
       discogsTokenSet: false,
       eq,
       server: {

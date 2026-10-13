@@ -18,6 +18,13 @@ export interface ScanOptions {
   readonly concurrency?: number
   readonly onProgress?: (progress: ScanProgress) => void
   readonly isCancelled?: () => boolean
+  /**
+   * Previous outcome for identity reuse: when the scan finds nothing added,
+   * changed, removed, failed, or cancelled, the previous tree/tracks are
+   * returned as-is so downstream memoization (summaries, UI) holds instead
+   * of rebuilding on identical content.
+   */
+  readonly previous?: { tree: LibraryTree; tracks: readonly Track[] }
 }
 
 export interface ScanOutcome {
@@ -105,7 +112,7 @@ export async function scanLibrary(options: ScanOptions): Promise<ScanOutcome> {
 
   const files = await collectAudioFiles(options.roots)
   const onDisk = await statAll(files)
-  const previousPaths = new Set(cache.values().map((track) => track.path))
+  const previousPaths = new Set(cache.paths())
 
   const plan = cache.planAndApply(onDisk)
 
@@ -160,6 +167,20 @@ export async function scanLibrary(options: ScanOptions): Promise<ScanOutcome> {
     failed,
     cancelled,
     durationMs: Date.now() - startedAt
+  }
+
+  // Clean scan (nothing added, changed, removed, failed, or cancelled):
+  // content is provably identical, so return the previous references and
+  // skip the regroup entirely.
+  if (
+    options.previous !== undefined &&
+    result.added === 0 &&
+    result.changed === 0 &&
+    result.removed === 0 &&
+    result.failed === 0 &&
+    result.cancelled === 0
+  ) {
+    return { tree: options.previous.tree, tracks: options.previous.tracks, result }
   }
 
   return { tree: groupLibrary(tracks), tracks, result }

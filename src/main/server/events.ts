@@ -30,13 +30,15 @@ export interface EventHubDeps {
 
 /**
  * Owns every live SSE subscription: caps, heartbeat, revocation drops, and
- * library pushes. The server closure holds one instance; master-token reads
+ * library pushes. createLibraryServer holds one instance; master-token reads
  * and library snapshots route back through injected getters so the hub never
  * owns library state.
  */
 export class EventHub {
   private readonly subs = new Set<EventSubscriber>()
   private heartbeat: NodeJS.Timeout | null = null
+  private lastPayloadFor: PublicLibrarySummary | null = null
+  private lastPayload = ''
 
   constructor(private readonly deps: EventHubDeps) {}
 
@@ -159,7 +161,14 @@ export class EventHub {
 
   pushLibraryChanged(): void {
     if (this.subs.size === 0) return
-    const payload = `data: ${JSON.stringify(this.deps.summarize())}\n\n`
+    // The summary is memoized upstream on track-list identity, so repeat
+    // pushes (heartbeats of an unchanged library) skip re-serialization too.
+    const summary = this.deps.summarize()
+    if (summary !== this.lastPayloadFor) {
+      this.lastPayload = `data: ${JSON.stringify(summary)}\n\n`
+      this.lastPayloadFor = summary
+    }
+    const payload = this.lastPayload
     for (const sub of [...this.subs]) {
       try {
         sub.response.write(payload)

@@ -9,6 +9,12 @@ export interface LibraryIndex {
   readonly tree: LibraryTree
   readonly tracksByPath: ReadonlyMap<string, Track>
   readonly albumsByKey: ReadonlyMap<string, Album>
+  /** Lowered track titles per path, built once per library so search never re-lowers per keystroke. */
+  readonly loweredTracks: ReadonlyMap<string, string>
+  /** Lowered album titles/artists per album key, same single-build deal. */
+  readonly loweredAlbums: ReadonlyMap<string, { title: string; artist: string }>
+  /** Lowered artist names per artist name. */
+  readonly loweredArtists: ReadonlyMap<string, string>
 }
 
 /**
@@ -20,17 +26,48 @@ export function buildLibraryIndex(
   tracks: readonly Track[]
 ): LibraryIndex {
   const tracksByPath = new Map<string, Track>()
-  for (const track of tracks) tracksByPath.set(track.path, track)
+  const loweredTracks = new Map<string, string>()
+  for (const track of tracks) {
+    tracksByPath.set(track.path, track)
+    loweredTracks.set(track.path, track.title.toLowerCase())
+  }
 
   const albumsByKey = new Map<string, Album>()
-  for (const album of tree.albums) albumsByKey.set(album.key, album)
+  const loweredAlbums = new Map<string, { title: string; artist: string }>()
+  for (const album of tree.albums) {
+    albumsByKey.set(album.key, album)
+    loweredAlbums.set(album.key, {
+      title: album.title.toLowerCase(),
+      artist: album.artist.toLowerCase()
+    })
+  }
 
-  return { tree, tracksByPath, albumsByKey }
+  const loweredArtists = new Map<string, string>()
+  for (const artist of tree.artists) loweredArtists.set(artist.name, artist.name.toLowerCase())
+
+  return { tree, tracksByPath, albumsByKey, loweredTracks, loweredAlbums, loweredArtists }
 }
 
 export function albumsForArtist(index: LibraryIndex, artistName: string): Album[] {
   const artist = index.tree.artists.find((entry) => entry.name === artistName)
   if (!artist) return []
+  return albumsOfArtist(index, artist)
+}
+
+/**
+ * First album of an already-resolved artist, for per-row sidebar rendering:
+ * walks the artist's own keys instead of re-finding the artist by name
+ * (which would make every sidebar render quadratic in the artist count).
+ */
+export function firstAlbumForArtist(index: LibraryIndex, artist: Artist): Album | undefined {
+  for (const key of artist.albumKeys) {
+    const album = index.albumsByKey.get(key)
+    if (album) return album
+  }
+  return undefined
+}
+
+function albumsOfArtist(index: LibraryIndex, artist: Artist): Album[] {
   const albums: Album[] = []
   for (const key of artist.albumKeys) {
     const album = index.albumsByKey.get(key)
@@ -55,7 +92,47 @@ export function allAlbums(index: LibraryIndex): Album[] {
 export function filterArtists(index: LibraryIndex, query: string): Artist[] {
   const needle = query.trim().toLowerCase()
   if (needle === '') return [...index.tree.artists]
-  return index.tree.artists.filter((artist) => artist.name.toLowerCase().includes(needle))
+  return index.tree.artists.filter((artist) => {
+    const lowered = index.loweredArtists.get(artist.name)
+    return (lowered ?? artist.name.toLowerCase()).includes(needle)
+  })
+}
+
+/**
+ * Track-title filter over an explicit list, using the index's pre-lowered
+ * titles. Same matches as per-track lowering, without re-lowering every
+ * keystroke.
+ */
+export function filterTracksByTitle(
+  index: LibraryIndex,
+  tracks: readonly Track[],
+  needle: string
+): Track[] {
+  if (needle === '') return []
+  return tracks.filter((track) => {
+    const lowered = index.loweredTracks.get(track.path)
+    return (lowered ?? track.title.toLowerCase()).includes(needle)
+  })
+}
+
+/** Album-title/artist match against the index's pre-lowered album entry. */
+function matchIndexedAlbum(
+  index: LibraryIndex,
+  album: Album,
+  needle: string
+): boolean {
+  if (needle === '') return true
+  const lowered = index.loweredAlbums.get(album.key)
+  const title = lowered ? lowered.title : album.title.toLowerCase()
+  const artist = lowered ? lowered.artist : album.artist.toLowerCase()
+  return title.includes(needle) || artist.includes(needle)
+}
+
+/** Track-title match against the index's pre-lowered title. */
+function matchIndexedTrack(index: LibraryIndex, track: Track, needle: string): boolean {
+  if (needle === '') return true
+  const lowered = index.loweredTracks.get(track.path)
+  return (lowered ?? track.title.toLowerCase()).includes(needle)
 }
 
 export interface ResolvedView {
@@ -88,7 +165,7 @@ export function resolveView(
         selection,
         artists,
         albums: [album],
-        tracks: tracksForAlbum(index, album).filter((track) => matchTrack(track, needle))
+        tracks: tracksForAlbum(index, album).filter((track) => matchIndexedTrack(index, track, needle))
       }
     }
   }
@@ -96,7 +173,7 @@ export function resolveView(
   if (selection.kind === 'artist') {
     const mine = albumsForArtist(index, selection.artist)
     if (mine.length > 0) {
-      const albums = mine.filter((album) => matchAlbum(album, needle))
+      const albums = mine.filter((album) => matchIndexedAlbum(index, album, needle))
       return {
         selection,
         artists,
@@ -106,7 +183,7 @@ export function resolveView(
     }
   }
 
-  const albums = allAlbums(index).filter((album) => matchAlbum(album, needle))
+  const albums = allAlbums(index).filter((album) => matchIndexedAlbum(index, album, needle))
   return {
     selection: { kind: 'all' },
     artists,
@@ -196,3 +273,10 @@ export function selectionForArtist(artist: Artist): Selection {
 }
 
 export const ALL_SELECTION: Selection = { kind: 'all' }
+
+/**
+ * Keystroke-to-filter delay: the search input stays immediate, but library
+ * filtering waits for a typing pause so each character doesn't re-scan
+ * thousands of tracks.
+ */
+export const SEARCH_DEBOUNCE_MS = 120

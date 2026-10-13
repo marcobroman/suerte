@@ -46,6 +46,7 @@ interface AlbumAccumulator {
   readonly title: string
   readonly years: Map<number, number>
   readonly tracks: Track[]
+  year: number | null
 }
 
 /**
@@ -55,6 +56,7 @@ interface AlbumAccumulator {
  */
 export function groupLibrary(tracks: readonly Track[]): LibraryTree {
   const accumulators = new Map<string, AlbumAccumulator>()
+  const byArtist = new Map<string, AlbumAccumulator[]>()
 
   for (const track of tracks) {
     const artist = track.artist.trim() || UNKNOWN_ARTIST
@@ -63,8 +65,11 @@ export function groupLibrary(tracks: readonly Track[]): LibraryTree {
 
     let accumulator = accumulators.get(key)
     if (accumulator === undefined) {
-      accumulator = { key, artist, title, years: new Map(), tracks: [] }
+      accumulator = { key, artist, title, years: new Map(), tracks: [], year: null }
       accumulators.set(key, accumulator)
+      const owned = byArtist.get(artist)
+      if (owned) owned.push(accumulator)
+      else byArtist.set(artist, [accumulator])
     }
     accumulator.tracks.push(track)
     if (track.year !== null) {
@@ -74,19 +79,19 @@ export function groupLibrary(tracks: readonly Track[]): LibraryTree {
 
   // Emit in a fixed order so repeated scans of a reordered directory, or a
   // differently-ordered database read, produce an identical tree.
-  const artistNames = [...new Set([...accumulators.values()].map((entry) => entry.artist))].sort(
-    compareText
-  )
+  const artistNames = [...byArtist.keys()].sort(compareText)
 
   const albums: Album[] = []
   const artists: Artist[] = []
 
   for (const name of artistNames) {
-    const owned = [...accumulators.values()].filter((entry) => entry.artist === name)
+    // Keyed by first-seen album order above, so always present.
+    const owned = byArtist.get(name) ?? []
+    for (const entry of owned) entry.year = mostCommonYear(entry.years)
     owned.sort((a, b) => {
       const byTitle = compareText(a.title, b.title)
       if (byTitle !== 0) return byTitle
-      return (mostCommonYear(a.years) ?? 0) - (mostCommonYear(b.years) ?? 0)
+      return (a.year ?? 0) - (b.year ?? 0)
     })
 
     const albumKeys: string[] = []
@@ -96,7 +101,7 @@ export function groupLibrary(tracks: readonly Track[]): LibraryTree {
         key: entry.key,
         artist: entry.artist,
         title: entry.title,
-        year: mostCommonYear(entry.years),
+        year: entry.year,
         trackPaths: entry.tracks.map((track) => track.path)
       })
       albumKeys.push(entry.key)

@@ -7,6 +7,8 @@ export const BAND_Q = 1.4
 export const BASS_SHELF_HZ = 250
 export const TREBLE_SHELF_HZ = 4000
 export const SHELF_Q = Math.SQRT1_2
+/** Hertz per kilohertz, for the compact band labels. */
+export const HZ_PER_KHZ = 1000
 
 export interface Band {
   readonly index: number
@@ -15,8 +17,8 @@ export interface Band {
 }
 
 export function formatFrequency(hz: number): string {
-  if (hz >= 1000) {
-    const kilohertz = hz / 1000
+  if (hz >= HZ_PER_KHZ) {
+    const kilohertz = hz / HZ_PER_KHZ
     return `${Number.isInteger(kilohertz) ? kilohertz : kilohertz.toFixed(1)}k`
   }
   return String(hz)
