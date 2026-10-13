@@ -43,30 +43,49 @@ export interface PlaybackControls {
 }
 
 /**
- * Owns the engine for the lifetime of the component. The graph is created lazily
- * inside the engine, so no AudioContext exists until the first play.
- *
- * The queue is explicit: viewing/navigating never touches it. Only play actions
- * (playQueue/playAt) change what is queued, so drilling into an album cannot
- * interrupt playback.
- *
- * Audio bytes come from the injected reader (Electron bridge by default), so a
- * streaming backend can supply them instead without touching this hook.
+ * The control surface the hook shell needs. Both engines satisfy it today;
+ * if one drifts, the compiler points at the divergence instead of users.
  */
-export function usePlaybackEngine(
-  readFile: (path: string) => Promise<ArrayBuffer> = (path) => window.equalizer.readFile(path)
-): PlaybackControls {
-  const engineRef = useRef<PlaybackEngine | null>(null)
-  const readFileRef = useRef(readFile)
-  readFileRef.current = readFile
+export interface EngineControlsTarget {
+  subscribe(listener: (status: EngineStatus) => void): () => void
+  position(): number
+  dispose(): Promise<void>
+  toggle(): Promise<void>
+  seek(positionSec: number): Promise<void>
+  next(): Promise<void>
+  previous(): Promise<void>
+  playAt(index: number): Promise<void>
+  setQueue(tracks: readonly Track[], startIndex?: number, preservePlayback?: boolean): void
+  addNext(tracks: readonly Track[]): void
+  addLast(tracks: readonly Track[]): void
+  removeAt(index: number): void
+  refreshTracks(tracks: readonly Track[]): void
+  setEq(settings: EqSettings): void
+  setRepeat(mode: RepeatMode): void
+  cycleRepeat(): void
+  setShuffle(on: boolean): void
+  toggleShuffle(): void
+  setVolume(linear: number): void
+}
+
+/**
+ * Shared shell behind usePlaybackEngine/useStreamEngine: engine lifetime,
+ * status subscription, per-frame position clock, and the control table.
+ * Only engine construction differs per transport. The constructor rides a
+ * ref (same idiom as the old readFileRef/backendRef mirrors) so the engine
+ * is still created exactly once on mount.
+ */
+export function useEngineControls<E extends EngineControlsTarget>(
+  create: () => E
+): Omit<PlaybackControls, 'engine'> & { engine: E | null } {
+  const engineRef = useRef<E | null>(null)
+  const createRef = useRef(create)
+  createRef.current = create
   const [status, setStatus] = useState<EngineStatus>(IDLE_STATUS)
   const [positionSec, setPositionSec] = useState(0)
 
   useEffect(() => {
-    const engine = new PlaybackEngine({
-      createGraph: createWebAudioGraph,
-      readFile: (path) => readFileRef.current(path)
-    })
+    const engine = createRef.current()
     engineRef.current = engine
     const unsubscribe = engine.subscribe(setStatus)
 
@@ -94,7 +113,7 @@ export function usePlaybackEngine(
     return () => cancelAnimationFrame(frame)
   }, [status])
 
-  const call = useCallback((action: (engine: PlaybackEngine) => void) => {
+  const call = useCallback((action: (engine: E) => void) => {
     const engine = engineRef.current
     if (engine) action(engine)
   }, [])
@@ -151,4 +170,29 @@ export function usePlaybackEngine(
     toggleShuffle: useCallback(() => call((engine) => engine.toggleShuffle()), [call]),
     setVolume: useCallback((volume: number) => call((engine) => engine.setVolume(volume)), [call])
   }
+}
+
+/**
+ * Owns the engine for the lifetime of the component. The graph is created lazily
+ * inside the engine, so no AudioContext exists until the first play.
+ *
+ * The queue is explicit: viewing/navigating never touches it. Only play actions
+ * (playQueue/playAt) change what is queued, so drilling into an album cannot
+ * interrupt playback.
+ *
+ * Audio bytes come from the injected reader (Electron bridge by default), so a
+ * streaming backend can supply them instead without touching this hook.
+ */
+export function usePlaybackEngine(
+  readFile: (path: string) => Promise<ArrayBuffer> = (path) => window.equalizer.readFile(path)
+): PlaybackControls {
+  const readFileRef = useRef(readFile)
+  readFileRef.current = readFile
+  return useEngineControls(
+    () =>
+      new PlaybackEngine({
+        createGraph: createWebAudioGraph,
+        readFile: (path) => readFileRef.current(path)
+      })
+  )
 }

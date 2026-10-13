@@ -1,6 +1,6 @@
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { DEFAULT_SERVER_PORT, DEFAULT_THEME, EQ_BAND_COUNT, isThemeId, type DeviceRecord, type PersistedEqSettings, type ServerConfig, type ServerSession, type ThemeId } from '@shared/types'
+import { DEFAULT_SERVER_PORT, DEFAULT_THEME, EQ_BAND_COUNT, MAX_DEVICE_NAME_LENGTH, isThemeId, type DeviceRecord, type PersistedEqSettings, type ServerConfig, type ServerSession, type ThemeId } from '@shared/types'
 import { isEncryptedEnvelope, plaintextSecretBox, type SecretBox } from './secrets'
 
 export const CONFIG_VERSION = 1
@@ -132,6 +132,14 @@ export async function loadConfig(
   }
 }
 
+/** User-facing ports only: no privileged binds, no overflow. Shared with the
+ * IPC guard so the accepted range cannot drift between load and save. */
+export function isValidServerPort(port: unknown): port is number {
+  return (
+    typeof port === 'number' && Number.isInteger(port) && port >= 1024 && port <= 65535
+  )
+}
+
 /** A bad port falls back instead of dropping the whole section (and its token). */
 export function normalizeServerConfig(
   value: unknown,
@@ -142,10 +150,7 @@ export function normalizeServerConfig(
   const port = record['port']
   return {
     enabled: record['enabled'] === true,
-    port:
-      typeof port === 'number' && Number.isInteger(port) && port >= 1024 && port <= 65535
-        ? port
-        : DEFAULT_SERVER_PORT,
+    port: isValidServerPort(port) ? port : DEFAULT_SERVER_PORT,
     token: normalizeToken(record['token'], box),
     allowInsecure: record['allowInsecure'] === true,
     sessions: normalizeServerSessions(record['sessions'], box),
@@ -160,7 +165,7 @@ export function normalizeServerConfig(
  * Over-long values are dropped too: persisted ids are fixed-size hex, so
  * megabytes here mean a hostile or corrupt file, not data.
  */
-function openSecret(value: unknown, box: SecretBox): string | undefined {
+function openExactSecret(value: unknown, box: SecretBox): string | undefined {
   let opened: string | undefined
   if (typeof value === 'string') opened = value
   else if (isEncryptedEnvelope(value)) {
@@ -190,7 +195,7 @@ export function normalizeServerSessions(
   for (const entry of value) {
     if (typeof entry !== 'object' || entry === null) continue
     const record = entry as Record<string, unknown>
-    const id = openSecret(record['id'], box)
+    const id = openExactSecret(record['id'], box)
     const createdAt = record['createdAt']
     const lastSeen = record['lastSeen']
     if (typeof id !== 'string' || id === '' || seen.has(id)) continue
@@ -220,7 +225,7 @@ export function normalizeDeviceRecords(
   for (const entry of value) {
     if (typeof entry !== 'object' || entry === null) continue
     const record = entry as Record<string, unknown>
-    const token = openSecret(record['token'], box)
+    const token = openExactSecret(record['token'], box)
     const name = record['name']
     const createdAt = record['createdAt']
     const lastSeen = record['lastSeen']
@@ -230,7 +235,7 @@ export function normalizeDeviceRecords(
     seen.add(token)
     devices.push({
       token,
-      name: typeof name === 'string' && name !== '' ? name.slice(0, 64) : 'Phone',
+      name: typeof name === 'string' && name !== '' ? name.slice(0, MAX_DEVICE_NAME_LENGTH) : 'Phone',
       createdAt,
       lastSeen
     })

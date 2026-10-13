@@ -6,7 +6,7 @@ import { app, BrowserWindow, shell } from 'electron'
 import { loadConfig, saveConfig, configPath } from './config'
 import { electronSecretBox } from './secrets'
 import { ensureServerCert } from './cert'
-import { createIpcContext, registerIpc, rescan } from './ipc'
+import { createIpcContext, registerIpc, rescan, serverConfigOf } from './ipc'
 import { createLibraryServer, selectServerTransport } from './server'
 import { readCoverDataUrl } from './library/covers'
 
@@ -80,14 +80,7 @@ app.whenReady().then(async () => {
       theme: ipcContext.theme,
       discogsToken: ipcContext.discogsToken,
       eq: ipcContext.eq,
-      server: {
-        enabled: ipcContext.serverConfig.enabled,
-        port: ipcContext.serverConfig.port,
-        token: ipcContext.serverConfig.token,
-        allowInsecure: ipcContext.serverConfig.allowInsecure,
-        sessions: [...ipcContext.serverConfig.sessions],
-        devices: ipcContext.serverConfig.devices.map((device) => ({ ...device }))
-      }
+      server: serverConfigOf(ipcContext)
     }, ipcContext.secrets)
   }
 

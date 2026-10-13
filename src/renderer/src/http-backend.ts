@@ -8,26 +8,33 @@ import type {
   TagUpdateOutcome
 } from '@shared/ipc'
 import type { AppSettings, ScanResult } from '@shared/types'
-import { DEFAULT_SERVER_PORT, isThemeId } from '@shared/types'
+import { DEFAULT_SERVER_PORT, SECOND_MS, isThemeId } from '@shared/types'
 import { normalizeEqSettings } from './audio/settings'
 import type { Backend } from './backend'
 
 const THEME_KEY = 'onda.phone.theme'
 const EQ_KEY = 'onda.phone.eq'
+/** Auth re-probes ride failures, not a timer: at most one check per 30 seconds. */
+const AUTH_PROBE_DEBOUNCE_MS = 30 * SECOND_MS
 
 function unsupported(feature: string): Error {
   return new Error(`${feature} is only available on the desktop app.`)
 }
 
+/** Desktop-only `Backend` stubs share this single throw; messages unchanged. */
+function desktopOnly(feature: string): never {
+  throw unsupported(feature)
+}
+
 /** Wire shape → app model: roots stay empty, opaque ids ride the path slots. */
-function toLibrarySummary(publique: PublicLibrarySummary): LibrarySummary {
+function toLibrarySummary(remote: PublicLibrarySummary): LibrarySummary {
   return {
-    tree: publique.tree,
-    tracks: publique.tracks,
-    trackCount: publique.trackCount,
+    tree: remote.tree,
+    tracks: remote.tracks,
+    trackCount: remote.trackCount,
     roots: [],
     missingRoots: [],
-    scanning: publique.scanning
+    scanning: remote.scanning
   }
 }
 
@@ -85,6 +92,39 @@ export function clearServerCredentials(storage: RemovableStorage): void {
   storage.removeItem(SERVER_CREDS_KEY)
 }
 
+/** Single trailing-slash strip for base URLs; fragments are never sent. */
+function stripTrailingSlashes(url: string): string {
+  return url.replace(/\/+$/, '')
+}
+
+/**
+ * Single fragment-parser tail behind the three boot-link readers: strip the
+ * `#`, run the caller's literal key pattern, decode. Null when absent,
+ * blank, or undecodable. Patterns stay literals at the call sites (no
+ * dynamically built regex on a security-relevant parse); only the
+ * slice/exec/decode shape is shared. Fingerprint length stays the caller's
+ * job (normalizeFingerprint), so the cap cannot drift.
+ */
+function hashValue(hash: string, pattern: RegExp): string | null {
+  const match = pattern.exec(hash.startsWith('#') ? hash.slice(1) : hash)
+  if (!match?.[1]) return null
+  try {
+    const value = decodeURIComponent(match[1])
+    return value === '' ? null : value
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Single boot-link builder: stripped base plus one fragment, with the
+ * certificate fingerprint riding along the same fragment discipline.
+ */
+function entryUrl(baseUrl: string, fragment: string, fingerprint: string | null): string {
+  const base = `${stripTrailingSlashes(baseUrl)}/${fragment}`
+  return fingerprint ? `${base}&fp=${encodeURIComponent(fingerprint)}` : base
+}
+
 /**
  * Phone boot entry: the QR code and copy-link carry the token in the fragment,
  * which browsers never send to the server, so it cannot leak into access logs.
@@ -92,20 +132,12 @@ export function clearServerCredentials(storage: RemovableStorage): void {
  * can show it for trust-on-first-use comparison.
  */
 export function phoneEntryUrl(baseUrl: string, token: string, fingerprint: string | null = null): string {
-  const base = `${baseUrl.replace(/\/+$/, '')}/#t=${encodeURIComponent(token)}`
-  return fingerprint ? `${base}&fp=${encodeURIComponent(fingerprint)}` : base
+  return entryUrl(baseUrl, `#t=${encodeURIComponent(token)}`, fingerprint)
 }
 
 /** Inverse of phoneEntryUrl for the boot screen; null when absent. */
 export function tokenFromHash(hash: string): string | null {
-  const match = /(?:^|&)t=([^&]*)/.exec(hash.startsWith('#') ? hash.slice(1) : hash)
-  if (!match?.[1]) return null
-  try {
-    const token = decodeURIComponent(match[1])
-    return token === '' ? null : token
-  } catch {
-    return null
-  }
+  return hashValue(hash, /(?:^|&)t=([^&]*)/)
 }
 
 /**
@@ -137,20 +169,12 @@ export function describeServerUrl(url: string): ServerUrlKind {
  * device token. Same fragment discipline as phoneEntryUrl.
  */
 export function phonePairUrl(baseUrl: string, code: string, fingerprint: string | null = null): string {
-  const base = `${baseUrl.replace(/\/+$/, '')}/#pair=${encodeURIComponent(code)}`
-  return fingerprint ? `${base}&fp=${encodeURIComponent(fingerprint)}` : base
+  return entryUrl(baseUrl, `#pair=${encodeURIComponent(code)}`, fingerprint)
 }
 
 /** Inverse of phonePairUrl for the boot screen; null when absent. */
 export function pairFromHash(hash: string): string | null {
-  const match = /(?:^|&)pair=([^&]*)/.exec(hash.startsWith('#') ? hash.slice(1) : hash)
-  if (!match?.[1]) return null
-  try {
-    const code = decodeURIComponent(match[1])
-    return code === '' ? null : code
-  } catch {
-    return null
-  }
+  return hashValue(hash, /(?:^|&)pair=([^&]*)/)
 }
 
 /**
@@ -159,14 +183,7 @@ export function pairFromHash(hash: string): string | null {
  * itself, so this is shown for manual comparison before connecting.
  */
 export function fingerprintFromHash(hash: string): string | null {
-  const match = /(?:^|&)fp=([^&]*)/.exec(hash.startsWith('#') ? hash.slice(1) : hash)
-  if (!match?.[1]) return null
-  try {
-    const fingerprint = decodeURIComponent(match[1])
-    return normalizeFingerprint(fingerprint)
-  } catch {
-    return null
-  }
+  return normalizeFingerprint(hashValue(hash, /(?:^|&)fp=([^&]*)/))
 }
 
 /**
@@ -191,7 +208,7 @@ export async function assertServerIdentity(
   expectedFingerprint: string | null
 ): Promise<string | null> {
   const identity = await readJson<{ fingerprint?: unknown }>(
-    await fetch(`${baseUrl.replace(/\/+$/, '')}/api/fingerprint`)
+    await fetch(`${stripTrailingSlashes(baseUrl)}/api/fingerprint`)
   )
   // Length-capped: a hostile server must not plant bulk into storage/UI.
   const actual = normalizeFingerprint(identity.fingerprint)
@@ -216,7 +233,7 @@ export async function exchangePairingCode(
   const trimmedName = name.trim()
   if (trimmedName === '') throw new Error('Name your device first.')
   await assertServerIdentity(baseUrl, expectedFingerprint)
-  const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/pair`, {
+  const response = await fetch(`${stripTrailingSlashes(baseUrl)}/api/pair`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ code: code.trim(), name: trimmedName })
@@ -300,7 +317,7 @@ export class HttpBackend implements Backend {
   onLoggedOut: (() => void) | null = null
 
   constructor(baseUrl: string, token: string, storage: KeyValueStorage, expectedFingerprint: string | null = null) {
-    this.#baseUrl = baseUrl.replace(/\/+$/, '')
+    this.#baseUrl = stripTrailingSlashes(baseUrl)
     this.#token = token
     this.#storage = storage
     this.#expectedFingerprint = expectedFingerprint
@@ -430,7 +447,7 @@ export class HttpBackend implements Backend {
    */
   async probeAuthAfterFailure(): Promise<void> {
     const now = Date.now()
-    if (now - this.#lastAuthProbe < 30_000) return
+    if (now - this.#lastAuthProbe < AUTH_PROBE_DEBOUNCE_MS) return
     this.#lastAuthProbe = now
     try {
       const response = await fetch(`${this.#baseUrl}/api/session`, {
@@ -484,11 +501,11 @@ export class HttpBackend implements Backend {
   }
 
   async pickFolders(): Promise<string[]> {
-    throw unsupported('Choosing folders')
+    desktopOnly('Choosing folders')
   }
 
   async pickFiles(): Promise<string[]> {
-    throw unsupported('Choosing files')
+    desktopOnly('Choosing files')
   }
 
   async getLibrary(): Promise<LibrarySummary> {
@@ -496,15 +513,15 @@ export class HttpBackend implements Backend {
   }
 
   async scanLibrary(): Promise<ScanResult> {
-    throw unsupported('Scanning')
+    desktopOnly('Scanning')
   }
 
   async cancelScan(): Promise<void> {
-    throw unsupported('Scanning')
+    desktopOnly('Scanning')
   }
 
   async removeRoot(): Promise<LibrarySummary> {
-    throw unsupported('Forgetting folders')
+    desktopOnly('Forgetting folders')
   }
 
   async getSettings(): Promise<AppSettings> {
@@ -547,7 +564,7 @@ export class HttpBackend implements Backend {
   }
 
   async setDiscogsToken(): Promise<AppSettings> {
-    throw unsupported('Discogs')
+    desktopOnly('Discogs')
   }
 
   async setEqSettings(eq: unknown): Promise<AppSettings> {
@@ -566,43 +583,43 @@ export class HttpBackend implements Backend {
   }
 
   async setServerEnabled(): Promise<AppSettings> {
-    throw unsupported('Server settings')
+    desktopOnly('Server settings')
   }
 
   async setServerPort(): Promise<AppSettings> {
-    throw unsupported('Server settings')
+    desktopOnly('Server settings')
   }
 
   async setServerInsecure(): Promise<AppSettings> {
-    throw unsupported('Server settings')
+    desktopOnly('Server settings')
   }
 
   async restartServer(): Promise<AppSettings> {
-    throw unsupported('Server settings')
+    desktopOnly('Server settings')
   }
 
   async regenerateServerToken(): Promise<AppSettings> {
-    throw unsupported('Server settings')
+    desktopOnly('Server settings')
   }
 
   async regenerateServerCert(): Promise<AppSettings> {
-    throw unsupported('Server settings')
+    desktopOnly('Server settings')
   }
 
   async getServerToken(): Promise<string | null> {
-    throw unsupported('Server settings')
+    desktopOnly('Server settings')
   }
 
   async getPairingCode(): Promise<{ code: string; expiresAt: number } | null> {
-    throw unsupported('Server settings')
+    desktopOnly('Server settings')
   }
 
   async burnPairingCode(): Promise<void> {
-    throw unsupported('Server settings')
+    desktopOnly('Server settings')
   }
 
   async revokeServerDevice(): Promise<AppSettings> {
-    throw unsupported('Server settings')
+    desktopOnly('Server settings')
   }
 
   async readFile(path: string): Promise<ArrayBuffer> {
@@ -621,23 +638,23 @@ export class HttpBackend implements Backend {
   }
 
   async revealInExplorer(): Promise<void> {
-    throw unsupported('Revealing files')
+    desktopOnly('Revealing files')
   }
 
   async updateTags(_items: readonly TagUpdateItem[]): Promise<TagUpdateOutcome> {
-    throw unsupported('Tag editing')
+    desktopOnly('Tag editing')
   }
 
   async searchDiscogs(): Promise<DiscogsSearchOutcome> {
-    throw unsupported('Discogs')
+    desktopOnly('Discogs')
   }
 
   async getDiscogsRelease(): Promise<DiscogsReleaseOutcome> {
-    throw unsupported('Discogs')
+    desktopOnly('Discogs')
   }
 
   async fetchDiscogsArt(): Promise<DiscogsArtOutcome> {
-    throw unsupported('Discogs')
+    desktopOnly('Discogs')
   }
 
   onScanProgress(): () => void {

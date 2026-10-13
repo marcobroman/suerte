@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import QRCode from 'qrcode'
 import type { LibrarySummary } from '@shared/ipc'
-import type { Album, EqSettings, PersistedEqSettings, ServerStatus, ThemeId, Track } from '@shared/types'
-import { DEFAULT_SERVER_PORT } from '@shared/types'
+import type { Album, EqSettings, PersistedEqSettings, ThemeId, Track } from '@shared/types'
 import { extensionOf } from '@shared/audio-files'
 import { formatDuration } from './format'
 import { AlbumGrid } from './library/AlbumGrid'
@@ -14,10 +12,14 @@ import { OverflowMenu } from './library/OverflowMenu'
 import { QueueList } from './library/QueueList'
 import { Sidebar } from './library/Sidebar'
 import { SortControl } from './library/SortControl'
-import { applyTheme, resolveTheme, THEME_OPTIONS } from './library/themes'
+import { applyTheme, resolveTheme } from './library/themes'
+import { ThemeMenu } from './library/ThemeMenu'
+import { ServerSettingsMenu } from './library/ServerSettingsMenu'
 import { autoTagFilesOf, buildAutoTagQuery } from './library/autotag'
 import { eqPresetById } from './library/eqPresets'
 import { defaultEqSettings, normalizeEqSettings } from './audio/settings'
+import { useServerAdmin, type ServerAdmin } from './useServerAdmin'
+import { usePairing } from './usePairing'
 import {
   ALL_SELECTION,
   ALBUM_SORT_OPTIONS,
@@ -32,9 +34,8 @@ import {
   type Selection
 } from './library/view'
 import type { PlaybackControls } from './usePlaybackEngine'
-import { phonePairUrl, describeServerUrl, LoggedOutError, ServerIdentityChangedError, type HttpBackend } from './http-backend'
+import { LoggedOutError, ServerIdentityChangedError, type HttpBackend } from './http-backend'
 import type { Backend } from './backend'
-import { ViewportDebug } from './ViewportDebug'
 
 export interface AppProps {
   readonly backend: Backend
@@ -58,37 +59,21 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
   const [tokenDraft, setTokenDraft] = useState('')
   const [tokenBusy, setTokenBusy] = useState(false)
   const [tokenMessage, setTokenMessage] = useState('')
-  const [serverState, setServerState] = useState<ServerStatus>({
-    enabled: false,
-    port: DEFAULT_SERVER_PORT,
-    tokenSet: false,
-    allowInsecure: false,
-    secretsLocked: false,
-    url: null,
-    urls: [],
-    secure: false,
-    fingerprint: null,
-    certExpiresAt: null,
-    certStale: false,
-    devices: []
-  })
-  const [serverToken, setServerToken] = useState<string | null>(null)
-  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
-  /** The pairing code behind the displayed QR, if any — burned on discard. */
-  const [qrCode, setQrCode] = useState<string | null>(null)
-  /** The server address the displayed QR pairs over, if any. */
-  const [qrBase, setQrBase] = useState<string | null>(null)
-  /** Expiry epoch ms of the displayed code, for the "valid until" caption. */
-  const [qrExpiry, setQrExpiry] = useState<number | null>(null)
-  /**
-   * Outstanding copy-link codes per base URL. Copying burns the previous
-   * link code for that base, so at most one link code is ever live — the
-   * same single-code discipline the QR display already keeps.
-   */
-  const linkCodes = useRef(new Map<string, string>())
-  const [portDraft, setPortDraft] = useState('')
-  const [serverBusy, setServerBusy] = useState(false)
-  const [serverMessage, setServerMessage] = useState('')
+  // Ref bridge for the two server hooks (see usePairing's GetServerAdmin):
+  // pairing jobs only run on clicks, always after this commit, so the ref
+  // is populated by the time any getter call happens. Assigned during render
+  // because no effect runs before a (nonexistent) render-time job could.
+  const adminRef = useRef<ServerAdmin | null>(null)
+  const getAdmin = useCallback((): ServerAdmin => {
+    const admin = adminRef.current
+    if (!admin) throw new Error('server admin not ready')
+    return admin
+  }, [])
+  const pairing = usePairing(backend, getAdmin)
+  const admin = useServerAdmin(backend, pairing.qr)
+  adminRef.current = admin
+  const { serverBusy, setServerBusy, refreshServerState } = admin
+  const { qrCode, hideQrCode } = pairing
   const [sortKey, setSortKey] = useState<AlbumSortKey>('artist')
   const [sortDir, setSortDir] = useState<AlbumSortDir>('asc')
   const [autoTag, setAutoTag] = useState<{
@@ -174,7 +159,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
         applyTheme(resolved, document.documentElement)
         setThemeState(resolved)
         setDiscogsTokenSet(settings.discogsTokenSet)
-        setServerState(settings.server)
+        refreshServerState(settings)
         if (settings.eq) {
           playbackRef.current.setEq({
             ...normalizeEqSettings(settings.eq),
@@ -184,7 +169,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
         setSettingsLoaded(true)
       })
       .catch(() => undefined)
-  }, [backend])
+  }, [backend, refreshServerState])
 
   const saveToken = useCallback(() => {
     setTokenBusy(true)
@@ -217,268 +202,6 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
       .finally(() => setTokenBusy(false))
   }, [backend])
 
-  const refreshServerState = useCallback(
-    (settings: { server: ServerStatus }) => {
-      setServerState(settings.server)
-      if (!settings.server.tokenSet) setServerToken(null)
-    },
-    []
-  )
-
-  const toggleServer = useCallback(() => {
-    const next = !serverState.enabled
-    setServerBusy(true)
-    setServerMessage('')
-    setServerToken(null)
-    setQrDataUrl(null)
-    void backend
-      .setServerEnabled(next)
-      .then(
-        (settings) => {
-          refreshServerState(settings)
-          if (next && settings.server.url === null) {
-            setServerMessage(
-              settings.server.secretsLocked
-                ? 'OS keyring unavailable — serving stays off until it unlocks.'
-                : 'Could not listen — the port may be taken, or the certificate is missing.'
-            )
-          }
-        },
-        () => setServerMessage('Could not change the server.')
-      )
-      .finally(() => setServerBusy(false))
-  }, [backend, serverState.enabled, refreshServerState])
-
-  const savePort = useCallback(() => {
-    setServerBusy(true)
-    setServerMessage('')
-    void backend
-      .setServerPort(Number(portDraft))
-      .then(
-        (settings) => {
-          refreshServerState(settings)
-          setPortDraft('')
-        },
-        () => setServerMessage('Could not change the port.')
-      )
-      .finally(() => setServerBusy(false))
-  }, [backend, portDraft, refreshServerState])
-
-  const showServerToken = useCallback(() => {
-    setServerBusy(true)
-    void backend
-      .getServerToken()
-      .then(
-        (token) => setServerToken(token),
-        () => setServerMessage('Could not read the token.')
-      )
-      .finally(() => setServerBusy(false))
-  }, [backend])
-
-  const regenerateServerToken = useCallback(() => {
-    setServerBusy(true)
-    setServerToken(null)
-    // Rotation already wipes every pending code server-side; this just
-    // clears a now-useless QR from the screen.
-    setQrDataUrl(null)
-    setQrCode(null)
-    setQrBase(null)
-    setQrExpiry(null)
-    void backend
-      .regenerateServerToken()
-      .then(
-        (settings) => {
-          refreshServerState(settings)
-          setServerMessage('New token generated — every phone is logged out.')
-        },
-        () => setServerMessage('Could not regenerate the token.')
-      )
-      .finally(() => setServerBusy(false))
-  }, [backend, refreshServerState])
-
-  const toggleInsecure = useCallback(() => {
-    const next = !serverState.allowInsecure
-    setServerBusy(true)
-    setServerMessage('')
-    void backend
-      .setServerInsecure(next)
-      .then(
-        (settings) => {
-          refreshServerState(settings)
-          if (!next && settings.server.enabled && settings.server.url === null) {
-            setServerMessage('Unencrypted fallback off — the server stopped.')
-          }
-        },
-        () => setServerMessage('Could not change the fallback.')
-      )
-      .finally(() => setServerBusy(false))
-  }, [backend, serverState.allowInsecure, refreshServerState])
-
-  /**
-   * The pairing code behind the displayed QR. A ref, not just state: jobs
-   * below serialize through a chain, and only the ref is current when a
-   * queued job finally runs — rapid clicks can no longer mint two codes.
-   */
-  const displayedCode = useRef<string | null>(null)
-  /** Serializes pairing jobs so burns always precede the mint they guard. */
-  const pairMutex = useRef<Promise<void>>(Promise.resolve())
-
-  const serializePairing = useCallback((job: () => Promise<void>): void => {
-    pairMutex.current = pairMutex.current.then(job, job)
-  }, [])
-
-  /** Burns one code, never throwing: the 10-minute expiry is the backstop. */
-  const burnCode = useCallback(
-    async (code: string): Promise<void> => {
-      try {
-        await backend.burnPairingCode(code)
-      } catch {
-        // Best effort, as above.
-      }
-    },
-    [backend]
-  )
-
-  const clearQrDisplay = useCallback(() => {
-    setQrDataUrl(null)
-    setQrCode(null)
-    setQrBase(null)
-    setQrExpiry(null)
-  }, [])
-
-  const restartServer = useCallback(() => {
-    setServerBusy(true)
-    setServerMessage('')
-    // Restarting keeps the in-memory pairing book, so burn the displayed
-    // code instead of orphaning it.
-    const shown = displayedCode.current
-    displayedCode.current = null
-    clearQrDisplay()
-    serializePairing(async () => {
-      if (shown !== null) await burnCode(shown)
-      try {
-        const settings = await backend.restartServer()
-        refreshServerState(settings)
-        if (settings.server.url !== null) {
-          setServerMessage('Serving again — phones confirm the fingerprint if it changed.')
-        } else {
-          setServerMessage('Could not restart — the port may be taken.')
-        }
-      } catch {
-        setServerMessage('Could not restart the server.')
-      } finally {
-        setServerBusy(false)
-      }
-    })
-  }, [backend, burnCode, clearQrDisplay, refreshServerState, serializePairing])
-
-  const regenerateServerCert = useCallback(() => {
-    setServerBusy(true)
-    // A new identity does not wipe pairing codes, so burn the displayed one
-    // instead of orphaning it.
-    const shown = displayedCode.current
-    displayedCode.current = null
-    clearQrDisplay()
-    serializePairing(async () => {
-      if (shown !== null) await burnCode(shown)
-      try {
-        const settings = await backend.regenerateServerCert()
-        refreshServerState(settings)
-        setServerMessage('New certificate — phones confirm the new fingerprint once.')
-      } catch {
-        setServerMessage('Could not regenerate the certificate.')
-      } finally {
-        setServerBusy(false)
-      }
-    })
-  }, [backend, burnCode, clearQrDisplay, refreshServerState, serializePairing])
-
-  const hideQrCode = useCallback((): void => {
-    const shown = displayedCode.current
-    displayedCode.current = null
-    clearQrDisplay()
-    if (shown !== null) serializePairing(() => burnCode(shown))
-  }, [burnCode, clearQrDisplay, serializePairing])
-
-  const showQrCode = useCallback(
-    (base: string): void => {
-      serializePairing(async () => {
-        // Earlier jobs finished (chain), so the ref is current: burn
-        // whatever is live for this address before minting.
-        const prior = displayedCode.current
-        if (prior !== null) {
-          displayedCode.current = null
-          await burnCode(prior)
-        }
-        const liveLink = linkCodes.current.get(base)
-        if (liveLink !== undefined) {
-          linkCodes.current.delete(base)
-          await burnCode(liveLink)
-        }
-        setServerBusy(true)
-        try {
-          // Pairing entry, not API: the boot screen reads the single-use code
-          // from the fragment, which browsers never send to the server — and
-          // the master token never leaves this machine.
-          const pairing = await backend.getPairingCode()
-          if (!pairing) {
-            setServerMessage('Could not create a pairing code.')
-            clearQrDisplay()
-            return
-          }
-          displayedCode.current = pairing.code
-          setQrCode(pairing.code)
-          setQrBase(base)
-          setQrExpiry(pairing.expiresAt)
-          setQrDataUrl(
-            await QRCode.toDataURL(phonePairUrl(base, pairing.code, serverState.fingerprint), {
-              width: 200,
-              margin: 1
-            })
-          )
-        } catch {
-          setServerMessage('Could not generate the QR code.')
-          clearQrDisplay()
-        } finally {
-          setServerBusy(false)
-        }
-      })
-    },
-    [backend, burnCode, clearQrDisplay, serializePairing, serverState.fingerprint]
-  )
-
-  const renewQrCode = useCallback(() => {
-    if (qrBase !== null) showQrCode(qrBase)
-  }, [qrBase, showQrCode])
-
-  const copyPairLink = useCallback(
-    (base: string): void => {
-      serializePairing(async () => {
-        const previous = linkCodes.current.get(base)
-        if (previous !== undefined) {
-          linkCodes.current.delete(base)
-          await burnCode(previous)
-        }
-        setServerBusy(true)
-        try {
-          const pairing = await backend.getPairingCode()
-          if (!pairing) {
-            setServerMessage('Could not create a pairing code.')
-            return
-          }
-          linkCodes.current.set(base, pairing.code)
-          await navigator.clipboard.writeText(phonePairUrl(base, pairing.code, serverState.fingerprint))
-          setServerMessage('Copied — open it on the phone within 10 minutes.')
-        } catch {
-          setServerMessage('Copy failed — generate a QR code instead.')
-        } finally {
-          setServerBusy(false)
-        }
-      })
-    },
-    [backend, burnCode, serializePairing, serverState.fingerprint]
-  )
-
   const logoutPhone = useCallback(() => {
     if (!phone) return
     // PhoneRoot always hands an HttpBackend here; the cast narrows the
@@ -489,7 +212,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
       .logout()
       .catch(() => undefined)
       .then(() => loggedOutRef.current?.('Logged out on this phone.'))
-  }, [backend, phone])
+  }, [backend, phone, setServerBusy])
 
   /**
    * Cover-image failures feed the phone's auth probe: tags report no status,
@@ -507,23 +230,6 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
   useEffect(() => {
     if (!settingsOpen && qrCode !== null) hideQrCode()
   }, [settingsOpen, qrCode, hideQrCode])
-
-  const revokeDevice = useCallback(
-    (id: string) => {
-      setServerBusy(true)
-      void backend
-        .revokeServerDevice(id)
-        .then(
-          (settings) => {
-            refreshServerState(settings)
-            setServerMessage('Device revoked — it is logged out immediately.')
-          },
-          () => setServerMessage('Could not revoke the device.')
-        )
-        .finally(() => setServerBusy(false))
-    },
-    [backend, refreshServerState]
-  )
 
   const changeTheme = useCallback((next: ThemeId) => {
     // Applied immediately; main confirms and persists it.
@@ -586,78 +292,102 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
     void backend.revealInExplorer(path)
   }, [backend])
 
+  /**
+   * Non-empty album guard: resolves the album's tracks and runs fn only
+   * when there is something to play. Identity follows `index`.
+   */
+  const withAlbumTracks = useCallback(
+    (album: Album, fn: (tracks: Track[]) => void): void => {
+      const tracks = tracksForAlbum(index, album)
+      if (tracks.length > 0) fn(tracks)
+    },
+    [index]
+  )
+  /** Indexed-track guard for the current view; identity follows its tracks. */
+  const withViewTrack = useCallback(
+    (trackIndex: number, fn: (track: Track) => void): void => {
+      const track = view.tracks[trackIndex]
+      if (track) fn(track)
+    },
+    [view.tracks]
+  )
+  /** Indexed-track guard for search results; identity follows its tracks. */
+  const withSearchTrack = useCallback(
+    (trackIndex: number, fn: (track: Track) => void): void => {
+      const track = searchTracks[trackIndex]
+      if (track) fn(track)
+    },
+    [searchTracks]
+  )
+  /**
+   * Non-empty list guard for whole-list actions (play-all, queue-visible).
+   * The list passes through by reference; copies (for addNext/addLast)
+   * stay at the call site exactly as before.
+   */
+  const withTracks = useCallback(
+    (tracks: readonly Track[], fn: (tracks: readonly Track[]) => void): void => {
+      if (tracks.length > 0) fn(tracks)
+    },
+    []
+  )
+
   const playArtist = useCallback(() => {
-    if (view.tracks.length === 0) return
-    playback.playQueue(view.tracks, 0)
-  }, [view.tracks, playback])
+    withTracks(view.tracks, (tracks) => playback.playQueue(tracks, 0))
+  }, [view.tracks, playback, withTracks])
 
   const playAlbum = useCallback(
     (album: Album) => {
-      const tracks = tracksForAlbum(index, album)
-      if (tracks.length === 0) return
-      playback.playQueue(tracks, 0)
+      withAlbumTracks(album, (tracks) => playback.playQueue(tracks, 0))
     },
-    [index, playback]
+    [withAlbumTracks, playback]
   )
 
   const queueAlbumNext = useCallback(
     (album: Album) => {
-      const tracks = tracksForAlbum(index, album)
-      if (tracks.length === 0) return
-      playback.addNext(tracks)
+      withAlbumTracks(album, (tracks) => playback.addNext(tracks))
     },
-    [index, playback]
+    [withAlbumTracks, playback]
   )
 
   const queueAlbumLast = useCallback(
     (album: Album) => {
-      const tracks = tracksForAlbum(index, album)
-      if (tracks.length === 0) return
-      playback.addLast(tracks)
+      withAlbumTracks(album, (tracks) => playback.addLast(tracks))
     },
-    [index, playback]
+    [withAlbumTracks, playback]
   )
 
   const playTrackAt = useCallback(
     (trackIndex: number) => {
-      if (view.tracks.length === 0) return
-      playback.playQueue(view.tracks, trackIndex)
+      withTracks(view.tracks, (tracks) => playback.playQueue(tracks, trackIndex))
     },
-    [view.tracks, playback]
+    [view.tracks, playback, withTracks]
   )
 
   const playAllVisible = useCallback(() => {
-    if (view.tracks.length === 0) return
-    playback.playQueue(view.tracks, 0)
-  }, [view.tracks, playback])
+    withTracks(view.tracks, (tracks) => playback.playQueue(tracks, 0))
+  }, [view.tracks, playback, withTracks])
 
   const queueTrackNext = useCallback(
     (trackIndex: number) => {
-      const track = view.tracks[trackIndex]
-      if (!track) return
-      playback.addNext([track])
+      withViewTrack(trackIndex, (track) => playback.addNext([track]))
     },
-    [view.tracks, playback]
+    [withViewTrack, playback]
   )
 
   const queueTrackLast = useCallback(
     (trackIndex: number) => {
-      const track = view.tracks[trackIndex]
-      if (!track) return
-      playback.addLast([track])
+      withViewTrack(trackIndex, (track) => playback.addLast([track]))
     },
-    [view.tracks, playback]
+    [withViewTrack, playback]
   )
 
   const queueVisibleNext = useCallback(() => {
-    if (view.tracks.length === 0) return
-    playback.addNext([...view.tracks])
-  }, [view.tracks, playback])
+    withTracks(view.tracks, (tracks) => playback.addNext([...tracks]))
+  }, [view.tracks, playback, withTracks])
 
   const queueVisibleLast = useCallback(() => {
-    if (view.tracks.length === 0) return
-    playback.addLast([...view.tracks])
-  }, [view.tracks, playback])
+    withTracks(view.tracks, (tracks) => playback.addLast([...tracks]))
+  }, [view.tracks, playback, withTracks])
 
   const openAutoTagTracks = useCallback((tracks: readonly Track[]) => {
     const writable = tracks.filter((track) => extensionOf(track.path) === '.mp3')
@@ -669,17 +399,14 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
   }, [])
 
   const autoTagVisibleAlbum = useCallback(() => {
-    if (view.tracks.length === 0) return
-    openAutoTagTracks(view.tracks)
-  }, [view.tracks, openAutoTagTracks])
+    withTracks(view.tracks, openAutoTagTracks)
+  }, [view.tracks, openAutoTagTracks, withTracks])
 
   const autoTagVisibleTrack = useCallback(
     (trackIndex: number) => {
-      const track = view.tracks[trackIndex]
-      if (!track) return
-      openAutoTagTracks([track])
+      withViewTrack(trackIndex, (track) => openAutoTagTracks([track]))
     },
-    [view.tracks, openAutoTagTracks]
+    [withViewTrack, openAutoTagTracks]
   )
 
   const autoTagGridAlbum = useCallback(
@@ -797,37 +524,30 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
   )
 
   const playSearchTracks = useCallback(() => {
-    if (searchTracks.length === 0) return
-    playback.playQueue(searchTracks, 0)
-  }, [searchTracks, playback])
+    withTracks(searchTracks, (tracks) => playback.playQueue(tracks, 0))
+  }, [searchTracks, playback, withTracks])
 
   const playSearchTrackAt = useCallback(
     (trackIndex: number) => {
       // A results list is a grab-bag, not a listening context, so a click plays
       // just that track. Bulk actions (Play all, queue menus) cover the rest.
-      const track = searchTracks[trackIndex]
-      if (!track) return
-      playback.playQueue([track], 0)
+      withSearchTrack(trackIndex, (track) => playback.playQueue([track], 0))
     },
-    [searchTracks, playback]
+    [withSearchTrack, playback]
   )
 
   const queueSearchTrackNext = useCallback(
     (trackIndex: number) => {
-      const track = searchTracks[trackIndex]
-      if (!track) return
-      playback.addNext([track])
+      withSearchTrack(trackIndex, (track) => playback.addNext([track]))
     },
-    [searchTracks, playback]
+    [withSearchTrack, playback]
   )
 
   const queueSearchTrackLast = useCallback(
     (trackIndex: number) => {
-      const track = searchTracks[trackIndex]
-      if (!track) return
-      playback.addLast([track])
+      withSearchTrack(trackIndex, (track) => playback.addLast([track]))
     },
-    [searchTracks, playback]
+    [withSearchTrack, playback]
   )
 
   const canPlay =
@@ -1023,222 +743,7 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
                     {tokenMessage !== '' && <p className="settings-note">{tokenMessage}</p>}
                       </>
                     )}
-                    {!phone && (
-                      <>
-                        <p className="settings-label">Phone streaming</p>
-                    <label className="settings-check">
-                      <input
-                        type="checkbox"
-                        checked={serverState.enabled}
-                        disabled={serverBusy}
-                        onChange={toggleServer}
-                      />{' '}
-                      Serve library on the local network
-                    </label>
-                    {serverState.enabled && (
-                      <>
-                        {serverState.url !== null ? (
-                          serverState.urls.map((reachable) => {
-                            const kind = describeServerUrl(reachable)
-                            return (
-                              <div key={reachable}>
-                                <p className="settings-note">{reachable}</p>
-                                <p className="settings-note">
-                                  {kind === 'tailscale'
-                                    ? 'Tailscale — works from anywhere'
-                                    : 'Home network — same Wi-Fi only'}
-                                </p>
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  className="settings-item"
-                                  disabled={serverBusy}
-                                  onClick={() => void copyPairLink(reachable)}
-                                >
-                                  Copy pairing link (10 minutes)
-                                </button>
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  className="settings-item"
-                                  disabled={serverBusy}
-                                  onClick={() => void showQrCode(reachable)}
-                                >
-                                  Show QR code
-                                </button>
-                              </div>
-                            )
-                          })
-                        ) : (
-                          <p className="settings-note">
-                            Not reachable — the port may be taken.
-                          </p>
-                        )}
-                        {qrDataUrl !== null && (
-                          <>
-                            <img
-                              className="qr-code"
-                              src={qrDataUrl}
-                              alt="QR code linking to the phone client"
-                            />
-                            <p className="settings-note">
-                              Pairs over{' '}
-                              {qrBase !== null && describeServerUrl(qrBase) === 'tailscale'
-                                ? 'Tailscale'
-                                : 'the home network'}
-                              {qrExpiry !== null &&
-                                ` — code valid until ${new Date(qrExpiry).toLocaleTimeString()}`}.
-                              Hiding it kills the code immediately.
-                            </p>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="settings-item"
-                              disabled={serverBusy || qrBase === null}
-                              onClick={() => renewQrCode()}
-                            >
-                              New code
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="settings-item"
-                              onClick={() => hideQrCode()}
-                            >
-                              Hide QR code
-                            </button>
-                          </>
-                        )}
-                        <div className="token-row">
-                          <input
-                            className="token-input"
-                            inputMode="numeric"
-                            placeholder={`Port (now ${serverState.port})`}
-                            value={portDraft}
-                            onChange={(event) => setPortDraft(event.target.value)}
-                            aria-label="Server port"
-                          />
-                          <button
-                            type="button"
-                            className="token-save"
-                            disabled={serverBusy || portDraft.trim() === ''}
-                            onClick={savePort}
-                          >
-                            Set
-                          </button>
-                        </div>
-                        {serverToken !== null ? (
-                          <p className="settings-note token-value">{serverToken}</p>
-                        ) : (
-                          <button
-                            type="button"
-                            role="menuitem"
-                            className="settings-item"
-                            disabled={serverBusy}
-                            onClick={showServerToken}
-                          >
-                            Show access token
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="settings-item"
-                          disabled={serverBusy}
-                          onClick={regenerateServerToken}
-                        >
-                          New access token
-                        </button>
-                        <p className="settings-label">Security</p>
-                        <p className="settings-note">
-                          {serverState.secure
-                            ? 'Encrypted — phones connect over TLS. Confirm this fingerprint on first connect:'
-                            : serverState.url !== null
-                              ? 'NOT encrypted — the server runs plain HTTP. Prefer fixing the certificate over keeping this.'
-                              : 'Not encrypted — the server runs plain HTTP.'}
-                        </p>
-                        {serverState.fingerprint !== null && (
-                          <p className="settings-note token-value">{serverState.fingerprint}</p>
-                        )}
-                        {serverState.certExpiresAt !== null && (
-                          <p className="settings-note">
-                            Certificate valid until{' '}
-                            {new Date(serverState.certExpiresAt).toLocaleDateString()}
-                          </p>
-                        )}
-                        {serverState.certStale && (
-                          <>
-                            <p className="settings-note">
-                              Network addresses changed — the certificate no longer names this
-                              machine. Restart serving to renew it (phones confirm the new
-                              fingerprint once).
-                            </p>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="settings-item"
-                              disabled={serverBusy}
-                              onClick={restartServer}
-                            >
-                              Restart server
-                            </button>
-                          </>
-                        )}
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="settings-item"
-                          disabled={serverBusy}
-                          onClick={regenerateServerCert}
-                        >
-                          New certificate
-                        </button>
-                        <label className="settings-check">
-                          <input
-                            type="checkbox"
-                            checked={serverState.allowInsecure}
-                            disabled={serverBusy}
-                            onChange={toggleInsecure}
-                          />{' '}
-                          Allow unencrypted fallback if the certificate fails
-                        </label>
-                        {serverState.secretsLocked && (
-                          <p className="settings-note" role="alert">
-                            OS keyring unavailable — the server cannot keep tokens and stays
-                            stopped. Unlock the keyring (or set one up), then toggle
-                            serving off and on again.
-                          </p>
-                        )}
-                        <p className="settings-label">Connected devices</p>
-                        {serverState.devices.length === 0 ? (
-                          <p className="settings-note">
-                            No paired devices — scan the QR code to pair one.
-                          </p>
-                        ) : (
-                          serverState.devices.map((device) => (
-                            <div key={device.id} className="token-row">
-                              <p className="settings-note">
-                                {device.name} · paired{' '}
-                                {new Date(device.createdAt).toLocaleDateString()} · seen{' '}
-                                {new Date(device.lastSeen).toLocaleString()}
-                              </p>
-                              <button
-                                type="button"
-                                className="token-save"
-                                disabled={serverBusy}
-                                onClick={() => revokeDevice(device.id)}
-                                aria-label={`Revoke ${device.name}`}
-                              >
-                                Revoke
-                              </button>
-                            </div>
-                          ))
-                        )}
-                      </>
-                    )}
-                    {serverMessage !== '' && <p className="settings-note">{serverMessage}</p>}
-                      </>
-                    )}
+                    {!phone && <ServerSettingsMenu admin={admin} pairing={pairing} />}
                     {phone && (
                       <>
                         <p className="settings-label">This phone</p>
@@ -1254,28 +759,13 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
                       </>
                     )}
                     <p className="settings-label">Theme</p>
-                    {THEME_OPTIONS.map((option) => (
-                      <button
-                        key={option.id}
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked={option.id === theme}
-                        className={
-                          option.id === theme ? 'settings-item active' : 'settings-item'
-                        }
-                        onClick={() => {
-                          changeTheme(option.id)
-                          setSettingsOpen(false)
-                        }}
-                      >
-                        <span className="swatch-colors small" aria-hidden="true">
-                          {option.swatches.map((color) => (
-                            <span key={color} style={{ background: color }} />
-                          ))}
-                        </span>
-                        {option.label}
-                      </button>
-                    ))}
+                    <ThemeMenu
+                      current={theme}
+                      onSelect={(id) => {
+                        changeTheme(id)
+                        setSettingsOpen(false)
+                      }}
+                    />
                   </div>
                 )}
               </div>
@@ -1504,7 +994,6 @@ export function App({ backend, playback, phone, onLoggedOut }: AppProps) {
           onToggleShuffle={() => playback.toggleShuffle()}
         />
       </div>
-      {!phone && <ViewportDebug />}
       {autoTag && (
         <AutoTagDialog
           files={autoTagFilesOf(autoTag.tracks)}

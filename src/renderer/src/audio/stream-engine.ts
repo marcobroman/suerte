@@ -1,6 +1,7 @@
 import type { EqSettings, Track } from '@shared/types'
 import { ISO_BAND_FREQUENCIES } from './bands'
 import type { EngineStatus, RepeatMode } from './engine'
+import { buildStatus, clampRange } from './engine'
 import type { MediaElementLike, PlaybackGraph } from './graph'
 import { clampMasterVolume, defaultEqSettings } from './settings'
 
@@ -73,21 +74,18 @@ export class StreamEngine {
   }
 
   status(): EngineStatus {
-    const track = this.#queue[this.#index] ?? null
-    return {
-      state: this.#state,
-      track,
-      index: this.#index,
-      queue: [...this.#queue],
-      queueLength: this.#queue.length,
-      eq: { ...this.#eq, bandGainsDb: [...this.#eq.bandGainsDb] },
-      repeat: this.#repeat,
-      shuffle: this.#shuffle,
-      positionSec: this.position(),
-      durationSec: this.#durationSec,
-      volume: this.#volume,
-      error: this.#error
-    }
+    return buildStatus(
+      this.#queue,
+      this.#index,
+      this.#eq,
+      this.#repeat,
+      this.#shuffle,
+      this.position(),
+      this.#durationSec,
+      this.#volume,
+      this.#error,
+      this.#state
+    )
   }
 
   position(): number {
@@ -566,10 +564,3 @@ export class StreamEngine {
  * held a hair below the end.
  */
 const END_GUARD_SEC = 0.01
-
-function clampRange(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) return min
-  if (value < min) return min
-  if (value > max) return max
-  return value
-}

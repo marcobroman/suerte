@@ -1,11 +1,16 @@
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { X509Certificate } from 'node:crypto'
-import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import selfsigned from 'selfsigned'
+import { DAY_MS } from '@shared/types'
+import { listIPv4Addresses } from './util/net'
 
 const CERT_FILE = 'server-cert.pem'
 const KEY_FILE = 'server-key.pem'
+/** Self-signed identity lifetime: under the 825-day platform ceiling. */
+const CERT_VALIDITY_DAYS = 825
+/** RSA size for the server identity; generated once and stored, not per boot. */
+const CERT_KEY_SIZE_BITS = 2048
 
 /** The server's TLS identity: a self-signed certificate trusted once per phone via its fingerprint. */
 export interface ServerCert {
@@ -38,15 +43,7 @@ function describe(pem: string): { fingerprint: string; expiresAt: number } {
  * identity.
  */
 export function localIPv4s(): string[] {
-  const found: string[] = []
-  for (const addresses of Object.values(networkInterfaces())) {
-    for (const address of addresses ?? []) {
-      if (address.family === 'IPv4' && !address.internal && !found.includes(address.address)) {
-        found.push(address.address)
-      }
-    }
-  }
-  return found
+  return listIPv4Addresses()
 }
 
 /**
@@ -107,10 +104,10 @@ export async function ensureServerCert(directory: string, regenerate = false): P
   try {
     const now = new Date()
     generated = await selfsigned.generate([{ name: 'commonName', value: 'Onda Server' }], {
-      keySize: 2048,
+      keySize: CERT_KEY_SIZE_BITS,
       algorithm: 'sha256',
       notBeforeDate: now,
-      notAfterDate: new Date(now.getTime() + 825 * 24 * 60 * 60 * 1000),
+      notAfterDate: new Date(now.getTime() + CERT_VALIDITY_DAYS * DAY_MS),
       extensions: [
         {
           name: 'subjectAltName',

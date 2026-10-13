@@ -41,6 +41,22 @@ export interface EqSettings {
 /** Ten ISO bands, matching the DSP chain; also the persisted shape minus volume. */
 export const EQ_BAND_COUNT = 10
 
+/**
+ * Device names are typed on phones, checked in the pairing endpoint, and
+ * truncated on config load — all three share this so the limit cannot drift.
+ */
+export const MAX_DEVICE_NAME_LENGTH = 64
+
+/**
+ * Time-unit building blocks so durations read as intent, not arithmetic.
+ * Durations themselves stay declared at their use site (session TTLs,
+ * timeouts, debounce); these only replace the `24 * 60 * 60 * 1000` chains.
+ */
+export const SECOND_MS = 1_000
+export const MINUTE_MS = 60 * SECOND_MS
+export const HOUR_MS = 60 * MINUTE_MS
+export const DAY_MS = 24 * HOUR_MS
+
 /** Equalizer curve as stored in the config. Master volume stays session-only. */
 export interface PersistedEqSettings {
   readonly bandGainsDb: readonly number[]

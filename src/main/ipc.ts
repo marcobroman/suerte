@@ -6,7 +6,7 @@ import { IPC, LIBRARY_CHANGED_CHANNEL, SCAN_PROGRESS_CHANNEL, type DiscogsArtOut
 import type { LibraryTree, PersistedEqSettings, ScanResult, ServerConfig, TagWriteResult, ThemeId, Track } from '@shared/types'
 import { DEFAULT_SERVER_PORT, DEFAULT_THEME, isThemeId, type AppSettings } from '@shared/types'
 import { CoverCache, readCoverDataUrl } from './library/covers'
-import { normalizePersistedEq, normalizeToken, saveConfig } from './config'
+import { isValidServerPort, normalizePersistedEq, normalizeToken, saveConfig } from './config'
 import { ensureServerCert, certCoversIps, localIPv4s, type ServerCert } from './cert'
 import type { SecretBox } from './secrets'
 import { createDiscogsClient, DiscogsError } from './discogs'
@@ -16,6 +16,9 @@ import { scanLibrary } from './library/scan'
 import { sanitizeTagEdits, writeTrackTags } from './library/tags'
 import { lanBaseUrl, lanBaseUrls, selectServerTransport, insideRoots, type LibraryServer } from './server'
 import { readAudioBytes } from './util/read-bytes'
+
+/** Bulk tag-edit cap: bounds one IPC round-trip, never a success guarantee. */
+const MAX_TAG_UPDATE_ITEMS = 500
 
 /**
  * Renderer-supplied paths are trusted: the renderer only ever runs our own bundled
@@ -162,7 +165,7 @@ function settingsOf(context: IpcContext): AppSettings {
   }
 }
 
-function serverConfigOf(context: IpcContext): ServerConfig {
+export function serverConfigOf(context: IpcContext): ServerConfig {
   return {
     enabled: context.serverConfig.enabled,
     port: context.serverConfig.port,
@@ -204,6 +207,29 @@ async function containedPath(context: IpcContext, path: unknown): Promise<string
   }
   if (!insideRoots(roots, real)) throw new Error('unknown file')
   return real
+}
+
+/**
+ * Stop-then-start shared by server-lifecycle handlers: a config change takes
+ * effect by restarting serving, but never restarts into a transport the
+ * policy forbids (fail-closed). A taken port leaves the server stopped with
+ * a null URL. Callers set config/persist (and mint certs) first; callers
+ * whose restart was already conditional on listening keep that outer check.
+ */
+async function restartServingIfEnabled(context: IpcContext): Promise<void> {
+  if (context.server?.listening) {
+    await context.server.stop()
+  }
+  if (
+    context.serverConfig.enabled &&
+    selectServerTransport(context.serverTls, context.serverConfig.allowInsecure) !== 'disabled'
+  ) {
+    try {
+      await context.server?.start()
+    } catch {
+      // Taken port: stopped with a null URL.
+    }
+  }
 }
 
 export function registerIpc(context: IpcContext): void {
@@ -319,41 +345,21 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
     await persistConfig()
     // The policy takes effect immediately: disabling the fallback stops a
     // running plain-HTTP server, enabling it starts a stopped one.
-    if (context.server?.listening) {
-      await context.server.stop()
-    }
-    if (
-      context.serverConfig.enabled &&
-      selectServerTransport(context.serverTls, context.serverConfig.allowInsecure) !== 'disabled'
-    ) {
-      try {
-        await context.server?.start()
-      } catch {
-        // Same taken-port story: stopped with a null URL.
-      }
-    }
+    await restartServingIfEnabled(context)
     return settingsOf(context)
   })
 
   ipcMain.handle(IPC.setServerPort, async (_event, port: unknown): Promise<AppSettings> => {
-    if (typeof port !== 'number' || !Number.isInteger(port) || port < 1024 || port > 65535) {
+    if (!isValidServerPort(port)) {
       return settingsOf(context)
     }
     if (port === context.serverConfig.port) return settingsOf(context)
     context.serverConfig = { ...context.serverConfig, port }
     await persistConfig()
+    // The port moved but the identity did not; still, never restart into
+    // a transport the policy forbids (fail-closed even here).
     if (context.server?.listening) {
-      await context.server.stop()
-      // The port moved but the identity did not; still, never restart into
-      // a transport the policy forbids (fail-closed even here).
-      if (selectServerTransport(context.serverTls, context.serverConfig.allowInsecure) === 'disabled') {
-        return settingsOf(context)
-      }
-      try {
-        await context.server.start()
-      } catch {
-        // Same taken-port story as enabling: stopped with a null URL.
-      }
+      await restartServingIfEnabled(context)
     }
     return settingsOf(context)
   })
@@ -369,19 +375,7 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
         context.serverTls = null
       }
     }
-    if (context.server?.listening) {
-      await context.server.stop()
-    }
-    if (
-      context.serverConfig.enabled &&
-      selectServerTransport(context.serverTls, context.serverConfig.allowInsecure) !== 'disabled'
-    ) {
-      try {
-        await context.server?.start()
-      } catch {
-        // Taken port: stopped with a null URL.
-      }
-    }
+    await restartServingIfEnabled(context)
     return settingsOf(context)
   })
 
@@ -415,15 +409,11 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
   ipcMain.handle(IPC.regenerateServerCert, async (): Promise<AppSettings> => {
     // A new identity means phones re-trust once via the new fingerprint;
     // sessions and devices survive because the logins did not change.
-    // The server restarts so the new certificate takes effect immediately.
+    // The server restarts so the new certificate takes effect immediately —
+    // but only into a transport the policy allows (fail-closed).
     context.serverTls = await ensureServerCert(context.configDir, true)
     if (context.server?.listening) {
-      await context.server.stop()
-      try {
-        await context.server.start()
-      } catch {
-        // Same taken-port story: stopped with a null URL.
-      }
+      await restartServingIfEnabled(context)
     }
     return settingsOf(context)
   })
@@ -458,7 +448,7 @@ ipcMain.handle(IPC.removeRoot, async (_event, path: string) => {
 
   ipcMain.handle(IPC.updateTags, async (_event, items: unknown): Promise<TagUpdateOutcome> => {    // Bulk edits never fail atomically: every file reports its own result.
     const results: TagWriteResult[] = []
-    const list = Array.isArray(items) ? items.slice(0, 500) : []
+    const list = Array.isArray(items) ? items.slice(0, MAX_TAG_UPDATE_ITEMS) : []
     for (const item of list) {
       const candidate = item as Partial<TagUpdateItem> | null
       if (typeof candidate?.path !== 'string' || candidate.path === '') {

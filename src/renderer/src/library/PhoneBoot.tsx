@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
+import { MAX_DEVICE_NAME_LENGTH } from '@shared/types'
 import { HttpBackend, exchangePairingCode } from '../http-backend'
 
 /**
@@ -67,6 +68,50 @@ function FingerprintCheck({
 }
 
 /**
+ * Trust decision shared by both doors: a linked fingerprint renders the
+ * match-confirmation, a fingerprint-less link renders the unverified
+ * warning. One copy so the two doors cannot disagree on what trust means.
+ */
+function TrustGate({
+  fingerprint,
+  unverified,
+  acknowledged,
+  unverifiedAck,
+  onAcknowledge,
+  onUnverifiedAcknowledge
+}: {
+  fingerprint: string | null
+  unverified: string
+  acknowledged: boolean
+  unverifiedAck: boolean
+  onAcknowledge: (on: boolean) => void
+  onUnverifiedAcknowledge: (on: boolean) => void
+}) {
+  if (fingerprint !== null) {
+    return (
+      <FingerprintCheck
+        fingerprint={fingerprint}
+        acknowledged={acknowledged}
+        onAcknowledge={onAcknowledge}
+      />
+    )
+  }
+  return (
+    <>
+      <p className="content-sub">{unverified}</p>
+      <label className="boot-label">
+        <input
+          type="checkbox"
+          checked={unverifiedAck}
+          onChange={(event) => onUnverifiedAcknowledge(event.target.checked)}
+        />{' '}
+        I understand this connection is unverified
+      </label>
+    </>
+  )
+}
+
+/**
  * First-run gate for the phone client. Two doors: a pairing code from the
  * desktop QR (preferred — the phone gets its own device token and the master
  * token never leaves the desktop) or a manually entered token for old links.
@@ -83,40 +128,57 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
   const [deviceName, setDeviceName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Computed once per address, not per render: pure string, no reason to redo it.
+  const unverified = useMemo(() => unverifiedWarning(baseUrl), [baseUrl])
 
-  const connect = async (): Promise<void> => {
+  /**
+   * Shared probe→library→connect tail for both doors. Only the token source
+   * and the failure message differ: the manual door names its likely cause,
+   * the pairing door surfaces what the exchange reported.
+   */
+  const establish = async (
+    getToken: () => Promise<string>,
+    failureMessage: (error: unknown) => string
+  ): Promise<void> => {
     setBusy(true)
     setError(null)
     try {
       const trimmedBase = baseUrl.trim()
-      const trimmedToken = token.trim()
+      const deviceToken = await getToken()
       // The probe verifies identity before transmitting the token; the
       // adopted fingerprint flows to onConnect so saved trust is bound.
-      const probe = new HttpBackend(trimmedBase, trimmedToken, window.localStorage, fingerprint)
-      await probe.getLibrary()
-      onConnect(trimmedBase, trimmedToken, probe.serverFingerprint)
-    } catch {
-      setError('Could not reach the server — check the address and token.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const pair = async (): Promise<void> => {
-    setBusy(true)
-    setError(null)
-    try {
-      const trimmedBase = baseUrl.trim()
-      const deviceToken = await exchangePairingCode(trimmedBase, pairingCode, deviceName, fingerprint)
       const probe = new HttpBackend(trimmedBase, deviceToken, window.localStorage, fingerprint)
       await probe.getLibrary()
       onConnect(trimmedBase, deviceToken, probe.serverFingerprint)
     } catch (error: unknown) {
-      setError(error instanceof Error ? error.message : 'Pairing failed.')
+      setError(failureMessage(error))
     } finally {
       setBusy(false)
     }
   }
+
+  const connect = (): Promise<void> =>
+    establish(
+      async () => token.trim(),
+      () => 'Could not reach the server — check the address and token.'
+    )
+
+  const pair = (): Promise<void> =>
+    establish(
+      () => exchangePairingCode(baseUrl.trim(), pairingCode, deviceName, fingerprint),
+      (error: unknown) => (error instanceof Error ? error.message : 'Pairing failed.')
+    )
+
+  const trustGate = (
+    <TrustGate
+      fingerprint={fingerprint}
+      unverified={unverified}
+      acknowledged={acknowledged}
+      unverifiedAck={unverifiedAck}
+      onAcknowledge={setAcknowledged}
+      onUnverifiedAcknowledge={setUnverifiedAck}
+    />
+  )
 
   if (pairingCode !== '') {
     return (
@@ -140,27 +202,9 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
             onChange={(event) => setDeviceName(event.target.value)}
             placeholder="e.g. Marco's phone"
             autoComplete="off"
-            maxLength={64}
+            maxLength={MAX_DEVICE_NAME_LENGTH}
           />
-          {fingerprint !== null ? (
-            <FingerprintCheck
-              fingerprint={fingerprint}
-              acknowledged={acknowledged}
-              onAcknowledge={setAcknowledged}
-            />
-          ) : (
-            <>
-              <p className="content-sub">{unverifiedWarning(baseUrl)}</p>
-              <label className="boot-label">
-                <input
-                  type="checkbox"
-                  checked={unverifiedAck}
-                  onChange={(event) => setUnverifiedAck(event.target.checked)}
-                />{' '}
-                I understand this connection is unverified
-              </label>
-            </>
-          )}
+          {trustGate}
           {error !== null && (
             <p className="modal-error" role="alert">
               {error}
@@ -218,25 +262,7 @@ export function PhoneBoot({ initialBaseUrl, initialToken, initialPairingCode, in
           placeholder="From Settings on the desktop app"
           autoComplete="off"
         />
-        {fingerprint !== null ? (
-          <FingerprintCheck
-            fingerprint={fingerprint}
-            acknowledged={acknowledged}
-            onAcknowledge={setAcknowledged}
-          />
-        ) : (
-          <>
-            <p className="content-sub">{unverifiedWarning(baseUrl)}</p>
-            <label className="boot-label">
-              <input
-                type="checkbox"
-                checked={unverifiedAck}
-                onChange={(event) => setUnverifiedAck(event.target.checked)}
-              />{' '}
-              I understand this connection is unverified
-            </label>
-          </>
-        )}
+        {trustGate}
         {error !== null && (
           <p className="modal-error" role="alert">
             {error}

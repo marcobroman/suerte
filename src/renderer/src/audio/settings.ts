@@ -1,4 +1,5 @@
 import type { EqSettings } from '@shared/types'
+import { EQ_BAND_COUNT } from '@shared/types'
 import {
   autoPreampDb,
   clamp,
@@ -20,7 +21,7 @@ export const MASTER_VOLUME_MAX = 1
 
 export function defaultEqSettings(): EqSettings {
   return {
-    bandGainsDb: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    bandGainsDb: Array(EQ_BAND_COUNT).fill(0),
     preampDb: 0,
     autoPreamp: true,
     bassDb: 0,
@@ -49,7 +50,7 @@ export function normalizeEqSettings(
 ): EqSettings {
   const source = input ?? {}
   const bands = Array.isArray(source.bandGainsDb) ? source.bandGainsDb : []
-  const bandGainsDb = Array.from({ length: 10 }, (_, index) => {
+  const bandGainsDb = Array.from({ length: EQ_BAND_COUNT }, (_, index) => {
     const value = bands[index]
     return typeof value === 'number' && Number.isFinite(value) ? clampBandGain(value) : 0
   })

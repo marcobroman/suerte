@@ -24,6 +24,42 @@ export interface EngineStatus {
   readonly error: string | null
 }
 
+/**
+ * Shared status snapshot for both engines: same queue/eq copies, same
+ * fields, so desktop and phone UIs read identical shapes. The caller
+ * supplies its own position (buffer clock vs element clock differ); every
+ * other value passes through by value. Copies stay inside (fresh queue and
+ * EQ arrays per snapshot) exactly as each engine built them before.
+ */
+export function buildStatus(
+  queue: readonly Track[],
+  index: number,
+  eq: EqSettings,
+  repeat: RepeatMode,
+  shuffle: boolean,
+  positionSec: number,
+  durationSec: number,
+  volume: number,
+  error: string | null,
+  state: EngineState
+): EngineStatus {
+  const track = queue[index] ?? null
+  return {
+    state,
+    track,
+    index,
+    queue: [...queue],
+    queueLength: queue.length,
+    eq: { ...eq, bandGainsDb: [...eq.bandGainsDb] },
+    repeat,
+    shuffle,
+    positionSec,
+    durationSec,
+    volume,
+    error
+  }
+}
+
 export interface EngineOptions {
   createGraph(): PlaybackGraph
   readFile(path: string): Promise<ArrayBuffer>
@@ -96,21 +132,18 @@ export class PlaybackEngine {
   }
 
   status(): EngineStatus {
-    const track = this.#queue[this.#index] ?? null
-    return {
-      state: this.#state,
-      track,
-      index: this.#index,
-      queue: [...this.#queue],
-      queueLength: this.#queue.length,
-      eq: { ...this.#eq, bandGainsDb: [...this.#eq.bandGainsDb] },
-      repeat: this.#repeat,
-      shuffle: this.#shuffle,
-      positionSec: this.position(),
-      durationSec: this.#durationSec,
-      volume: this.#volume,
-      error: this.#error
-    }
+    return buildStatus(
+      this.#queue,
+      this.#index,
+      this.#eq,
+      this.#repeat,
+      this.#shuffle,
+      this.position(),
+      this.#durationSec,
+      this.#volume,
+      this.#error,
+      this.#state
+    )
   }
 
   position(): number {
@@ -614,7 +647,7 @@ export class PlaybackEngine {
   }
 }
 
-function clampRange(value: number, min: number, max: number): number {
+export function clampRange(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min
   if (value < min) return min
   if (value > max) return max
